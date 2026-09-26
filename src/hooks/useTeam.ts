@@ -1,0 +1,145 @@
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { supabase } from "@/integrations/supabase/client";
+import { useAuth, type AppRole } from "@/contexts/AuthContext";
+import { inviteLink } from "@/components/settings/validation";
+
+export interface Member {
+  user_id: string;
+  full_name: string | null;
+  email: string | null;
+  avatar_url: string | null;
+  job_title: string | null;
+  role: AppRole;
+  joined_at: string;
+}
+
+export interface Invitation {
+  id: string;
+  email: string;
+  role: AppRole;
+  token: string;
+  created_at: string;
+  expires_at: string | null;
+  accepted_at: string | null;
+}
+
+export interface CreatedInvitation {
+  id: string;
+  token: string;
+  email: string;
+  role: AppRole;
+  link: string;
+  /** True only when the send-invite edge function confirmed an email was delivered. */
+  emailSent: boolean;
+}
+
+export const teamMembersKey = ["team-members"] as const;
+export const invitationsKey = ["invitations"] as const;
+
+/** Members of the current workspace (any member may call). */
+export function useMembers() {
+  const { user, organization } = useAuth();
+  return useQuery({
+    queryKey: [...teamMembersKey, organization?.id],
+    enabled: !!user && !!organization,
+    queryFn: async (): Promise<Member[]> => {
+      const { data, error } = await supabase.rpc("list_members");
+      if (error) throw error;
+      return ((data ?? []) as unknown as Member[]).slice().sort((a, b) => a.joined_at.localeCompare(b.joined_at));
+    },
+  });
+}
+
+/** Pending (not yet accepted) invitations — visible to admins and managers via RLS. */
+export function useInvitations(enabled = true) {
+  const { user, organization } = useAuth();
+  return useQuery({
+    queryKey: [...invitationsKey, organization?.id],
+    enabled: enabled && !!user && !!organization,
+    queryFn: async (): Promise<Invitation[]> => {
+      const { data, error } = await supabase
+        .from("invitations")
+        .select("id, email, role, token, created_at, expires_at, accepted_at")
+        .is("accepted_at", null)
+        .order("created_at", { ascending: false });
+      if (error) throw error;
+      return (data ?? []) as unknown as Invitation[];
+    },
+  });
+}
+
+/** Tries to email an invitation. Never throws: returns false when no email provider is configured. */
+export async function sendInviteEmail(invitationId: string): Promise<boolean> {
+  try {
+    const { data, error } = await supabase.functions.invoke("send-invite", { body: { invitation_id: invitationId } });
+    if (error) return false;
+    return (data as { sent?: boolean } | null)?.sent === true;
+  } catch {
+    return false;
+  }
+}
+
+export async function createInvitation(email: string, role: AppRole): Promise<CreatedInvitation> {
+  const normalized = email.trim().toLowerCase();
+  const { data, error } = await supabase.rpc("create_invitation", { p_email: normalized, p_role: role });
+  if (error) throw error;
+  const row = (Array.isArray(data) ? data[0] : data) as { id: string; token: string } | null;
+  if (!row?.token) throw new Error("The invitation could not be created.");
+  const emailSent = await sendInviteEmail(row.id);
+  return { id: row.id, token: row.token, email: normalized, role, link: inviteLink(row.token), emailSent };
+}
+
+export function useCreateInvitation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ email, role }: { email: string; role: AppRole }) => createInvitation(email, role),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: invitationsKey });
+      queryClient.invalidateQueries({ queryKey: ["workspace-usage"] });
+    },
+  });
+}
+
+export function useRevokeInvitation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: string) => {
+      const { error } = await supabase.from("invitations").delete().eq("id", id);
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: invitationsKey });
+      queryClient.invalidateQueries({ queryKey: ["workspace-usage"] });
+    },
+  });
+}
+
+export function useUpdateMemberRole() {
+  const queryClient = useQueryClient();
+  const { user, refreshUserRole } = useAuth();
+  return useMutation({
+    mutationFn: async ({ userId, role }: { userId: string; role: AppRole }) => {
+      const { error } = await supabase.rpc("update_member_role", { p_user_id: userId, p_role: role });
+      if (error) throw error;
+      return { userId };
+    },
+    onSuccess: async ({ userId }) => {
+      await queryClient.invalidateQueries({ queryKey: teamMembersKey });
+      if (userId === user?.id) await refreshUserRole();
+    },
+  });
+}
+
+export function useRemoveMember() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (userId: string) => {
+      const { error } = await supabase.rpc("remove_member", { p_user_id: userId });
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: teamMembersKey });
+      queryClient.invalidateQueries({ queryKey: ["workspace-usage"] });
+    },
+  });
+}

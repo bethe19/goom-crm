@@ -1,112 +1,139 @@
-import { useState } from "react";
-import { Activity, useUpdateActivity, useDeleteActivity } from "@/hooks/useActivities";
+import { Link, useNavigate } from "react-router-dom";
+import { format } from "date-fns";
+import { MoreHorizontal, Pencil, Trash2 } from "lucide-react";
+import { useDeleteActivity, type Activity } from "@/hooks/useActivities";
 import { formatRelativeDate } from "@/lib/formatters";
+import { errorMessage } from "@/components/settings/validation";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { RichTextEditor } from "@/components/ui/rich-text-editor";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
+import { MarkdownView } from "@/components/ui/rich-text-editor";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useRecordPermissions } from "@/hooks/useRecordPermissions";
+import { useConfirm } from "@/components/common/ConfirmDialog";
 import { useToast } from "@/hooks/use-toast";
-import { Phone, Mail, Calendar, FileText, Pencil, Trash2, Save, X } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { memberName, useWorkspaceMembers } from "@/components/pipeline/useWorkspaceMembers";
+import { activityMeta } from "./activityUtils";
 
-const typeConfig = {
-  call: { icon: Phone, color: "text-foreground", bg: "bg-secondary" },
-  email: { icon: Mail, color: "text-foreground", bg: "bg-secondary" },
-  meeting: { icon: Calendar, color: "text-foreground", bg: "bg-secondary" },
-  note: { icon: FileText, color: "text-foreground", bg: "bg-secondary" },
-};
+interface ActivityItemProps {
+  activity: Activity;
+  /** Opens the activity (edit dialog). Defaults to navigating to `/activities?open=<id>`. */
+  onOpen?: (activity: Activity) => void;
+  highlighted?: boolean;
+  /** Hide the deal link (e.g. inside the deal's own sheet). */
+  hideDeal?: boolean;
+  hideContact?: boolean;
+  className?: string;
+}
 
-export function ActivityItem({ activity }: { activity: Activity }) {
-  const config = typeConfig[activity.type];
-  const Icon = config.icon;
-  const updateActivity = useUpdateActivity();
-  const deleteActivity = useDeleteActivity();
+export function ActivityItem({ activity, onOpen, highlighted, hideDeal, hideContact, className }: ActivityItemProps) {
+  const meta = activityMeta(activity.type);
+  const Icon = meta.icon;
+  const navigate = useNavigate();
+  const confirm = useConfirm();
   const { toast } = useToast();
-  const [editing, setEditing] = useState(false);
-  const [editTitle, setEditTitle] = useState(activity.title);
-  const [editDescription, setEditDescription] = useState(activity.description || "");
-  const [editType, setEditType] = useState(activity.type);
+  const deleteActivity = useDeleteActivity();
+  const { canDelete } = useRecordPermissions();
+  const deletable = canDelete({ user_id: activity.user_id });
+  const { byId } = useWorkspaceMembers();
+  const author = activity.user_id ? byId.get(activity.user_id) : undefined;
 
-  const handleSave = () => {
-    updateActivity.mutate(
-      { id: activity.id, title: editTitle, description: editDescription || null, type: editType },
-      { onSuccess: () => { toast({ title: "Activity updated" }); setEditing(false); } }
-    );
-  };
+  const open = () => (onOpen ? onOpen(activity) : navigate(`/activities?open=${activity.id}`));
 
-  const handleDelete = () => {
+  const handleDelete = async () => {
+    if (!(await confirm({ title: "Delete this activity?", description: `“${activity.title}” will be permanently deleted.`, confirmLabel: "Delete" }))) return;
     deleteActivity.mutate(activity.id, {
-      onSuccess: () => toast({ title: "Activity deleted" }),
+      onSuccess: () => toast({ title: "Activity deleted", variant: "success" }),
+      onError: (err) => toast({ title: "Couldn't delete activity", description: errorMessage(err), variant: "destructive" }),
     });
   };
 
-  if (editing) {
-    return (
-      <div className="rounded-lg border bg-card p-4 space-y-3">
-        <div className="flex flex-col gap-2 sm:flex-row">
-          <Select value={editType} onValueChange={(v) => setEditType(v as Activity["type"])}>
-            <SelectTrigger className="w-full sm:w-32"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="call">📞 Call</SelectItem>
-              <SelectItem value="email">📧 Email</SelectItem>
-              <SelectItem value="meeting">📅 Meeting</SelectItem>
-              <SelectItem value="note">📝 Note</SelectItem>
-            </SelectContent>
-          </Select>
-          <Input value={editTitle} onChange={(e) => setEditTitle(e.target.value)} placeholder="Title" className="flex-1" />
-        </div>
-        <RichTextEditor value={editDescription} onChange={setEditDescription} rows={2} placeholder="Description..." />
-        <div className="flex gap-2">
-          <Button size="sm" onClick={handleSave} disabled={updateActivity.isPending}>
-            <Save className="h-3 w-3 mr-1" /> Save
-          </Button>
-          <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>
-            <X className="h-3 w-3 mr-1" /> Cancel
-          </Button>
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="group flex gap-3 rounded-lg border bg-card p-4">
-      <div className={`flex h-9 w-9 items-center justify-center rounded-lg ${config.bg}`}>
-        <Icon className={`h-4 w-4 ${config.color}`} />
+    <article
+      id={`activity-${activity.id}`}
+      className={cn(
+        "group relative flex gap-3 rounded-xl border bg-card p-3.5 transition-colors duration-150 hover:border-foreground/20",
+        highlighted && "ring-2 ring-ring ring-offset-2 ring-offset-background",
+        deleteActivity.isPending && "opacity-50",
+        className,
+      )}
+    >
+      <div className={cn("flex h-8 w-8 shrink-0 items-center justify-center rounded-lg", meta.chip)} aria-hidden>
+        <Icon className="h-4 w-4" />
       </div>
-      <div className="flex-1 min-w-0">
-        <p className="font-medium text-sm">{activity.title}</p>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-start justify-between gap-2">
+          <button
+            type="button"
+            onClick={open}
+            className="min-w-0 text-left text-sm font-medium text-foreground after:absolute after:inset-0 after:rounded-xl focus-visible:outline-none focus-visible:after:ring-2 focus-visible:after:ring-ring"
+          >
+            <span className="sr-only">{meta.label}: </span>
+            <span className="break-words">{activity.title}</span>
+          </button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="relative z-10 -mr-1 -mt-1 h-7 w-7 shrink-0 rounded-md text-muted-foreground sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100 data-[state=open]:opacity-100"
+                aria-label={`Actions for ${activity.title}`}
+              >
+                <MoreHorizontal className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onSelect={open}>
+                <Pencil className="mr-2 h-4 w-4" aria-hidden /> Edit
+              </DropdownMenuItem>
+              {deletable && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onSelect={handleDelete} className="text-destructive focus:text-destructive">
+                    <Trash2 className="mr-2 h-4 w-4" aria-hidden /> Delete
+                  </DropdownMenuItem>
+                </>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
         {activity.description && (
-          <p className="text-sm text-muted-foreground mt-1 line-clamp-2">{activity.description}</p>
+          <MarkdownView value={activity.description} className="mt-1 line-clamp-3 break-words text-sm text-muted-foreground" />
         )}
-        <div className="flex items-center gap-2 mt-2 text-xs text-muted-foreground">
-          <span className="capitalize">{activity.type}</span>
-          {activity.deals && <span>· {activity.deals.title}</span>}
-          {activity.contacts && <span>· {activity.contacts.first_name} {activity.contacts.last_name}</span>}
-          <span className="ml-auto">{formatRelativeDate(activity.created_at)}</span>
+        <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+          <span>{meta.label}</span>
+          {!hideDeal && activity.deals && (
+            <>
+              <span aria-hidden>·</span>
+              <Link to={`/pipeline?open=${activity.deals.id}`} className="relative z-10 truncate hover:text-foreground hover:underline">
+                {activity.deals.title}
+              </Link>
+            </>
+          )}
+          {!hideContact && activity.contacts && (
+            <>
+              <span aria-hidden>·</span>
+              <Link to={`/contacts?open=${activity.contacts.id}`} className="relative z-10 truncate hover:text-foreground hover:underline">
+                {activity.contacts.first_name} {activity.contacts.last_name}
+              </Link>
+            </>
+          )}
+          {author && (
+            <>
+              <span aria-hidden>·</span>
+              <span>{memberName(author)}</span>
+            </>
+          )}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <time dateTime={activity.created_at} className="relative z-10 ml-auto whitespace-nowrap tabular-nums">
+                {formatRelativeDate(activity.created_at)}
+              </time>
+            </TooltipTrigger>
+            <TooltipContent>{format(new Date(activity.created_at), "PPpp")}</TooltipContent>
+          </Tooltip>
         </div>
       </div>
-      <div className="flex gap-1 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
-        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setEditing(true)}>
-          <Pencil className="h-3 w-3" />
-        </Button>
-        <AlertDialog>
-          <AlertDialogTrigger asChild>
-            <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive">
-              <Trash2 className="h-3 w-3" />
-            </Button>
-          </AlertDialogTrigger>
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>Delete activity?</AlertDialogTitle>
-              <AlertDialogDescription>This will permanently delete this activity.</AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel>Cancel</AlertDialogCancel>
-              <AlertDialogAction onClick={handleDelete}>Delete</AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
-      </div>
-    </div>
+    </article>
   );
 }

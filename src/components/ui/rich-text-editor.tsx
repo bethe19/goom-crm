@@ -1,26 +1,15 @@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { sanitizeHref } from "@/lib/sanitize";
+import { renderMarkdown } from "@/lib/sanitize";
 
-function parseMarkdown(md: string): string {
-  let html = md
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-  // bold
-  html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-  // italic
-  html = html.replace(/\*(.+?)\*/g, "<em>$1</em>");
-  // links
-  html = html.replace(/\[(.+?)\]\((.+?)\)/g, (_, text, href) => `<a href="${sanitizeHref(href)}" class="text-primary underline" target="_blank" rel="noopener">${text}</a>`);
-  // unordered lists
-  html = html.replace(/^- (.+)$/gm, "<li>$1</li>");
-  html = html.replace(/(<li>.*<\/li>\n?)+/g, (m) => `<ul class="list-disc pl-4 space-y-1">${m}</ul>`);
-  // line breaks
-  html = html.replace(/\n/g, "<br />");
-  return html;
+/** Read-only rendering of note markdown (safe: see renderMarkdown). */
+export function MarkdownView({ value, className }: { value: string; className?: string }) {
+  return (
+    <div
+      className={className ?? "text-sm leading-relaxed text-foreground/90 break-words"}
+      dangerouslySetInnerHTML={{ __html: renderMarkdown(value) }}
+    />
+  );
 }
 
 interface RichTextEditorProps {
@@ -48,7 +37,7 @@ export function RichTextEditor({ value, onChange, rows = 3, placeholder }: RichT
       <TabsContent value="preview" className="mt-2">
         <div
           className="min-h-[60px] rounded-md border bg-muted/30 p-3 text-sm prose prose-sm max-w-none"
-          dangerouslySetInnerHTML={{ __html: value ? parseMarkdown(value) : '<span class="text-muted-foreground">Nothing to preview</span>' }}
+          dangerouslySetInnerHTML={{ __html: value ? renderMarkdown(value) : '<span class="text-muted-foreground">Nothing to preview</span>' }}
         />
       </TabsContent>
     </Tabs>

@@ -1,74 +1,50 @@
-import React from "react";
 import { cn } from "@/lib/utils";
 
 interface BrandProps {
+  /** Use on dark surfaces regardless of theme (white mark, white wordmark). */
   inverse?: boolean;
   size?: "sm" | "md" | "lg";
   showText?: boolean;
   className?: string;
 }
 
-export function Brand({
-  inverse = false,
-  size = "md",
-  showText = true,
-  className,
-}: BrandProps) {
-  const iconSizeClasses = {
-    sm: "h-6 w-6",
-    md: "h-8 w-8",
-    lg: "h-10 w-10",
-  }[size];
+const ICON_SIZE = { sm: "h-6 w-6", md: "h-7 w-7", lg: "h-10 w-10" } as const;
+const TEXT_SIZE = { sm: "text-base", md: "text-lg", lg: "text-2xl" } as const;
 
-  const textSizeClasses = {
-    sm: "text-base",
-    md: "text-lg",
-    lg: "text-2xl",
-  }[size];
-
+/**
+ * Goom logo: a squircle "G" mark plus wordmark. By default the mark follows the theme
+ * (near-black on light, near-white on dark) via `currentColor` + tokens.
+ */
+export function Brand({ inverse = false, size = "md", showText = true, className }: BrandProps) {
   return (
-    <div className={cn("inline-flex items-center gap-2.5 select-none", className)} aria-label="Goom">
-      <div
+    <span className={cn("inline-flex select-none items-center gap-2", className)}>
+      <span
         className={cn(
-          "relative shrink-0 flex items-center justify-center rounded-xl transition-transform duration-200 group-hover:scale-105 shadow-xs",
-          iconSizeClasses
+          "relative flex shrink-0 items-center justify-center",
+          ICON_SIZE[size],
+          inverse ? "text-white" : "text-foreground",
         )}
       >
-        <svg
-          viewBox="0 0 100 100"
-          className="w-full h-full"
-          fill="none"
-          xmlns="http://www.w3.org/2000/svg"
-        >
-          {/* Black squircle on light, white on dark/inverse */}
-          <rect
-            width="100"
-            height="100"
-            rx="24"
-            fill={inverse ? "#FFFFFF" : "#09090b"}
-          />
-          {/* White G icon glyph on light, black on dark/inverse */}
+        <svg viewBox="0 0 100 100" className="h-full w-full" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Goom">
+          <rect width="100" height="100" rx="24" fill="currentColor" />
           <path
             d="M 74 23 A 36 36 0 1 0 87 50 L 56 50"
-            stroke={inverse ? "#09090b" : "#FFFFFF"}
+            className={inverse ? "stroke-neutral-950" : "stroke-background"}
             strokeWidth="9.5"
             strokeLinecap="round"
             strokeLinejoin="round"
           />
         </svg>
-      </div>
+      </span>
       {showText && (
         <span
-          className={cn(
-            "font-semibold tracking-tight font-sans transition-colors",
-            textSizeClasses,
-            inverse ? "text-white" : "text-foreground"
-          )}
+          aria-hidden="true"
+          className={cn("font-semibold tracking-tight", TEXT_SIZE[size], inverse ? "text-white" : "text-foreground")}
         >
           Goom
         </span>
       )}
-    </div>
+    </span>
   );
 }
 

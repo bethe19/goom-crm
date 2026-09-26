@@ -1,534 +1,395 @@
-import { useState, useMemo } from "react";
-import { useAuth } from "@/contexts/AuthContext";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
+import { addDays, addMonths, format } from "date-fns";
+import { CheckSquare, ChevronDown, DollarSign, Percent, Phone, Plus, Target, Trophy, UserPlus, Users, UserRound } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
-import { Card } from "@/components/ui/card";
+import { useAuth } from "@/contexts/AuthContext";
+import { PageBanner } from "@/components/PageBanner";
 import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Badge } from "@/components/ui/badge";
-import {
-  TrendingUp,
-  DollarSign,
-  Target,
-  Clock,
-  RotateCcw,
-  UploadCloud,
-  Plus,
-  MoreHorizontal,
-  UserPlus,
-  PhoneCall,
-  CheckSquare,
-  MessageSquarePlus,
-  Building2,
-  Sparkles,
-} from "lucide-react";
-import { seedGoomConstructionWorkspace } from "@/lib/seedGoomConstruction";
-import { formatCurrency } from "@/lib/formatters";
-import { RecentActivity } from "@/components/dashboard/RecentActivity";
-import { ClosingSoon } from "@/components/dashboard/ClosingSoon";
-import { PipelineFunnelChart, StageFunnelItem } from "@/components/dashboard/PipelineFunnelChart";
-import { RevenueTrendChart } from "@/components/dashboard/RevenueTrendChart";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { BetaFeedbackDialog } from "@/components/BetaFeedbackDialog";
-import { CreateDealDialog } from "@/components/pipeline/CreateDealDialog";
-import { CreateContactDialog } from "@/components/contacts/CreateContactDialog";
-import { LogActivityDialog } from "@/components/activities/LogActivityDialog";
-import { CreateTaskDialog } from "@/components/tasks/CreateTaskDialog";
-import { DealDetailSheet } from "@/components/pipeline/DealDetailSheet";
-import { usePipelines, usePipelineStages, PipelineStage } from "@/hooks/usePipelineStages";
-import { Deal } from "@/hooks/useDeals";
+import { ErrorState } from "@/components/common/States";
+import { KpiCard } from "@/components/dashboard/KpiCard";
+import { GetStartedCard } from "@/components/dashboard/GetStartedCard";
+import { RevenueTrendChart } from "@/components/dashboard/RevenueTrendChart";
+import { PipelineFunnelChart } from "@/components/dashboard/PipelineFunnelChart";
+import { WinLossCard } from "@/components/dashboard/WinLossCard";
+import { CloseMonthChart } from "@/components/dashboard/CloseMonthChart";
+import { ClosingSoon } from "@/components/dashboard/ClosingSoon";
+import { MyTasks } from "@/components/dashboard/MyTasks";
+import { RecentActivity } from "@/components/dashboard/RecentActivity";
+import { Segmented } from "@/components/dashboard/ChartParts";
+import { VIZ_VARS } from "@/components/dashboard/chartTheme";
+import { formatCurrency, formatPercent } from "@/lib/formatters";
+import { cn } from "@/lib/utils";
 import {
-  getDemoDeals,
-  DEMO_STAGES,
-  resetDemoData,
-  seedSupabaseWithDemoData,
-} from "@/lib/demoData";
-import { toast } from "sonner";
-import { startOfWeek, startOfMonth, startOfQuarter } from "date-fns";
-import { useSearchParams, useNavigate } from "react-router-dom";
+  averageDealSize,
+  buildForecast,
+  closingSoon,
+  effectiveProbability,
+  getPeriodRange,
+  getPreviousPeriodRange,
+  lastMonthsBuckets,
+  openDeals,
+  openPipelineValue,
+  performanceSeries,
+  periodDelta,
+  rateDelta,
+  stageBreakdown,
+  stageFlow,
+  sumValue,
+  timeBuckets,
+  lostDealsIn,
+  useAnalyticsRealtime,
+  useStageHistory,
+  useWorkspaceAnalytics,
+  weightedPipelineValue,
+  winRate,
+  wonRevenue,
+} from "@/hooks/useAnalytics";
 
-type Period = "week" | "month" | "quarter" | "all";
+const WINDOW_DAYS = 90;
+type RangeMonths = "6" | "12";
 
-function getStartDate(period: Period): string | null {
-  const now = new Date();
-  if (period === "week") return startOfWeek(now, { weekStartsOn: 1 }).toISOString();
-  if (period === "month") return startOfMonth(now).toISOString();
-  if (period === "quarter") return startOfQuarter(now).toISOString();
-  return null;
+function greeting(now: Date) {
+  const h = now.getHours();
+  if (h < 12) return "Good morning";
+  if (h < 18) return "Good afternoon";
+  return "Good evening";
 }
 
 export default function Index() {
-  // All hooks MUST be called unconditionally at the top — React Rules of Hooks
-  const { user, isDemoMode, isAdmin } = useAuth();
-  const [searchParams] = useSearchParams();
+  const { user, organization, can, hasFeature } = useAuth();
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
-  const [period, setPeriod] = useState<Period>("all");
+  const currency = organization?.currency || "USD";
+  const teamView = can("team.view_reports");
+  const hasHistoryFeature = hasFeature("audit_history");
+  const hasForecast = hasFeature("forecast");
+  const [pipelineId, setPipelineId] = useState<string | undefined>();
+  const [rangeMonths, setRangeMonths] = useState<RangeMonths>("6");
+  const months = Number(rangeMonths);
 
-  // Dialog states for in-place actions (no page redirects!)
-  const [feedbackOpen, setFeedbackOpen] = useState(false);
-  const [createDealOpen, setCreateDealOpen] = useState(false);
-  const [createContactOpen, setCreateContactOpen] = useState(false);
-  const [logActivityOpen, setLogActivityOpen] = useState(false);
-  const [createTaskOpen, setCreateTaskOpen] = useState(false);
-  const [selectedDealForSheet, setSelectedDealForSheet] = useState<Deal | null>(null);
-  const [seedingCloud, setSeedingCloud] = useState(false);
+  useAnalyticsRealtime();
+  const analytics = useWorkspaceAnalytics();
+  const history = useStageHistory(hasHistoryFeature);
+  const { data } = analytics;
 
-  const since = getStartDate(period);
-
-  const { data: pipelines } = usePipelines();
-  const activePipeline = pipelines?.[0];
-  const { data: liveStages } = usePipelineStages(activePipeline?.id);
-
-  const effectiveStages: PipelineStage[] = useMemo(() => {
-    if (!liveStages || liveStages.length === 0) {
-      return DEMO_STAGES.map((s) => ({
-        id: s.id,
-        pipeline_id: "demo-pipeline",
-        name: s.name,
-        color: s.color,
-        position: s.position,
-        created_at: "2026-01-01T00:00:00Z",
-      }));
-    }
-    return liveStages;
-  }, [liveStages]);
-
-  const { data: profile } = useQuery({
-    queryKey: ["profile-dashboard", user?.id],
+  const profile = useQuery({
+    queryKey: ["analytics", "profile-name", user?.id],
+    enabled: !!user?.id,
     queryFn: async () => {
-      if (isDemoMode) {
-        return {
-          full_name: "Alex Vance",
-          avatar_url: "",
-          company: "Goom Global",
-        };
-      }
-      const { data } = await supabase
-        .from("profiles")
-        .select("avatar_url, full_name, company")
-        .eq("user_id", user!.id)
-        .single();
-      return {
-        ...data,
-        full_name: data?.full_name || user?.user_metadata?.full_name || user?.email?.split("@")[0] || "Team Member",
-      };
-    },
-    enabled: !!user,
-  });
-
-  const { data: stats, isLoading } = useQuery({
-    queryKey: ["dashboard-stats", period, isDemoMode],
-    queryFn: async () => {
-      if (isDemoMode) {
-        const demoDeals = getDemoDeals();
-        const totalValue = demoDeals.reduce((sum, d) => sum + d.value, 0);
-        const wonCount = demoDeals.filter((d) => d.stage_name === "Won").length;
-        const lostCount = demoDeals.filter((d) => d.stage_name === "Lost").length;
-        const closed = wonCount + lostCount;
-        const winRate = closed > 0 ? Math.round((wonCount / closed) * 100) : 38;
-
-        const funnelStages: StageFunnelItem[] = DEMO_STAGES.map((s) => {
-          const matching = demoDeals.filter((d) => d.stage_id === s.id);
-          return {
-            id: s.id,
-            name: s.name,
-            color: s.color,
-            count: matching.length,
-            value: matching.reduce((sum, d) => sum + d.value, 0),
-          };
-        });
-
-        return {
-          totalDeals: demoDeals.length,
-          totalValue,
-          winRate,
-          avgCycle: 16,
-          funnelStages,
-          deals: demoDeals,
-          isFallback: false,
-        };
-      }
-
-      // Live Supabase query
-      let dealsQuery = supabase.from("deals").select("*, companies(name), contacts(first_name, last_name)", { count: "exact" });
-      if (since) {
-        dealsQuery = dealsQuery.gte("created_at", since);
-      }
-      const { data: dealsData, count: totalDeals } = await dealsQuery;
-      const totalValue = dealsData?.reduce((sum, d: any) => sum + Number(d.value || 0), 0) || 0;
-
-      const { data: stages } = await supabase.from("pipeline_stages").select("id, name, color, position").order("position");
-      const effectivePipelineStages = stages && stages.length > 0 ? stages : DEMO_STAGES;
-
-      if (!dealsData || dealsData.length === 0) {
-        const funnelStages: StageFunnelItem[] = effectivePipelineStages.map((s: any) => ({
-          id: s.id,
-          name: s.name,
-          color: s.color || "#3b82f6",
-          count: 0,
-          value: 0,
-        }));
-        return {
-          totalDeals: 0,
-          totalValue: 0,
-          winRate: 0,
-          avgCycle: 0,
-          funnelStages,
-          deals: [],
-          isFallback: false,
-        };
-      }
-
-      const wonId = stages?.find((s: any) => s.name === "Won")?.id;
-      const lostId = stages?.find((s: any) => s.name === "Lost")?.id;
-
-      const wonCount = dealsData.filter((d: any) => d.stage_id === wonId).length;
-      const lostCount = dealsData.filter((d: any) => d.stage_id === lostId).length;
-      const closedTotal = wonCount + lostCount;
-      const winRate = closedTotal > 0 ? Math.round((wonCount / closedTotal) * 100) : 0;
-
-      const funnelStages: StageFunnelItem[] = (stages || []).map((s: any) => {
-        const matching = dealsData.filter((d: any) => d.stage_id === s.id);
-        return {
-          id: s.id,
-          name: s.name,
-          color: s.color || "#3b82f6",
-          count: matching.length,
-          value: matching.reduce((sum: number, d: any) => sum + Number(d.value || 0), 0),
-        };
-      });
-
-      return {
-        totalDeals: totalDeals || 0,
-        totalValue,
-        winRate,
-        avgCycle: 16,
-        funnelStages,
-        deals: dealsData,
-        isFallback: false,
-      };
+      const { data: row } = await supabase.from("profiles").select("full_name").eq("user_id", user!.id).maybeSingle();
+      return row?.full_name ?? null;
     },
   });
+  const fullName = profile.data || (user?.user_metadata?.full_name as string | undefined) || "";
+  const firstName = fullName.trim().split(/\s+/)[0] || "";
 
-  const handleOpenDealById = (dealId: string) => {
-    const allDeals = stats?.deals || (isDemoMode ? getDemoDeals() : []);
-    const found = allDeals.find((d: any) => d.id === dealId);
-    if (found) {
-      setSelectedDealForSheet(found as any);
-    } else {
-      toast({ title: "Deal detail opened", description: `Viewing deal #${dealId}` });
-    }
-  };
+  const now = useMemo(() => new Date(), []);
 
-  const handleSeedCloudData = async () => {
-    if (!user) return;
-    setSeedingCloud(true);
-    const res = await seedSupabaseWithDemoData(supabase, user.id);
-    setSeedingCloud(false);
-    if (res.success) {
-      toast({
-        title: "Workspace Populated! 🎉",
-        description: "Seeded realistic enterprise deals, contacts, and companies into Supabase.",
-      });
-      queryClient.invalidateQueries();
-    } else {
-      toast.error(res.error || "Seeding Error");
-    }
-  };
+  // Everything that depends only on the deals (not on the selected range / pipeline).
+  const base = useMemo(() => {
+    if (!data) return null;
+    const { deals, stagesById } = data;
+    const thisMonth = wonRevenue(deals, stagesById, getPeriodRange("this_month", now));
+    const lastMonth = wonRevenue(deals, stagesById, getPreviousPeriodRange("this_month", now));
+    const winRange = { start: addDays(now, -WINDOW_DAYS), end: addDays(now, 1) };
+    const prevWinRange = { start: addDays(now, -2 * WINDOW_DAYS), end: winRange.start };
+    const forecast = buildForecast(deals, stagesById, 6, now);
+    return {
+      openCount: openDeals(deals, stagesById).length,
+      openValue: openPipelineValue(deals, stagesById),
+      weighted: weightedPipelineValue(deals, stagesById),
+      thisMonth,
+      lastMonth,
+      monthDelta: periodDelta(thisMonth.value, lastMonth.value),
+      win: winRate(deals, stagesById, winRange),
+      prevWin: winRate(deals, stagesById, prevWinRange),
+      avgSize: averageDealSize(deals, stagesById, winRange),
+      prevAvgSize: averageDealSize(deals, stagesById, prevWinRange),
+      forecast,
+      closing: closingSoon(deals, stagesById, 30, now),
+      hasDeals: deals.length > 0,
+    };
+  }, [data, now]);
 
-  const [seedingGoom, setSeedingGoom] = useState(false);
+  const ranged = useMemo(() => {
+    if (!data) return null;
+    const { deals, stagesById } = data;
+    const buckets = lastMonthsBuckets(months, now);
+    const prevBuckets = timeBuckets({ start: addMonths(buckets[0].start, -months), end: buckets[0].start }, "month");
+    const cur = performanceSeries(deals, stagesById, buckets);
+    const prev = performanceSeries(deals, stagesById, prevBuckets);
+    const range = { start: buckets[0].start, end: buckets[buckets.length - 1].end };
+    const lost = lostDealsIn(deals, stagesById, range);
+    return {
+      range,
+      series: cur,
+      trend: cur.map((p, i) => ({
+        key: p.key,
+        label: p.label,
+        value: p.wonValue,
+        count: p.wonCount,
+        prev: prev[i] ? prev[i].wonValue : null,
+        prevLabel: prev[i] ? format(prev[i].start, "MMM yyyy") : undefined,
+      })),
+      won: { count: cur.reduce((s, p) => s + p.wonCount, 0), value: cur.reduce((s, p) => s + p.wonValue, 0) },
+      lost: { count: lost.length, value: sumValue(lost) },
+    };
+  }, [data, months, now]);
 
-  const handleSeedGoom = async () => {
-    if (!user) {
-      toast.error("Please log in to initialize workspace");
-      return;
-    }
-    setSeedingGoom(true);
-    try {
-      const res = await seedGoomConstructionWorkspace(supabase, user.id);
-      if (res.success) {
-        toast.success(res.message);
-        queryClient.invalidateQueries();
-      } else {
-        toast.error(res.message);
-      }
-    } catch (e: any) {
-      toast.error(e.message || "Failed to seed Goom Construction");
-    } finally {
-      setSeedingGoom(false);
-    }
-  };
+  const funnel = useMemo(() => {
+    if (!data || !ranged) return null;
+    const { deals, stages, pipelines } = data;
+    const activePipeline = pipelines.find((p) => p.id === pipelineId) ?? pipelines[0];
+    const pipelineDeals = deals.filter((d) => d.pipeline_id === activePipeline?.id);
+    return {
+      activePipelineId: activePipeline?.id,
+      rows: stageBreakdown(pipelineDeals, stages, activePipeline?.id),
+      flow: history.data ? stageFlow(pipelineDeals, stages, activePipeline?.id, history.data, { cohort: ranged.range }) : null,
+    };
+  }, [data, ranged, pipelineId, history.data]);
 
-  const handleResetSandbox = () => {
-    resetDemoData();
-    queryClient.invalidateQueries();
-    toast({
-      title: "Sandbox Reset",
-      description: "Restored initial 2026 enterprise dataset.",
-    });
-  };
+  const loading = analytics.isLoading;
+  const error = analytics.isError ? analytics.error : null;
+  const retry = () => analytics.refetch();
+  const rangePhrase = `last ${months} months`;
+  const money = (v: number) => formatCurrency(v, currency);
 
-  const periods: { label: string; value: Period }[] = [
-    { label: "This Week", value: "week" },
-    { label: "This Month", value: "month" },
-    { label: "This Quarter", value: "quarter" },
-    { label: "All Time", value: "all" },
-  ];
-
-  const targetQuota = 1250000;
-  const currentPipelineValue = stats?.totalValue || 0;
-  const quotaPercentage = Math.min(Math.round((currentPipelineValue / targetQuota) * 100), 100);
-
-  const statCards = [
-    {
-      label: "Active Pipeline Value",
-      value: formatCurrency(stats?.totalValue || 0),
-      delta: stats?.totalDeals ? "+22.4% vs last period" : "Real-time live pipeline",
-      icon: DollarSign,
-    },
-    {
-      label: "Deals in Velocity",
-      value: String(stats?.totalDeals || 0),
-      delta: stats?.totalDeals ? "Active in velocity" : "Ready for deals",
-      icon: Target,
-    },
-    {
-      label: "Win Conversion Rate",
-      value: `${stats?.winRate || 0}%`,
-      delta: stats?.totalDeals ? "+4.2% YoY pace" : "Calculated on closed deals",
-      icon: TrendingUp,
-    },
-    {
-      label: "Average Sales Cycle",
-      value: `${stats?.avgCycle || 0} days`,
-      delta: stats?.totalDeals ? "52% faster than benchmark" : "Paced on deal stages",
-      icon: Clock,
-    },
-  ];
+  const flowNote = !hasHistoryFeature
+    ? "Showing where open deals sit today. Stage-to-stage conversion comes from deal history, which is included in the Enterprise plan."
+    : history.isLoading
+      ? "Loading deal history…"
+      : history.isError
+        ? "Deal history couldn't be loaded, so this shows where open deals sit today."
+        : "Conversion between stages appears once deals start moving through this pipeline.";
 
   return (
-    <div className="space-y-6 max-w-[1600px] mx-auto">
-      {/* Superclean Minimal Header */}
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between pb-3 border-b border-border">
-        <div>
-          <div className="flex items-center gap-2.5">
-            <h1 className="text-2xl font-bold tracking-tight text-foreground">
-              Dashboard
-            </h1>
-            <Badge
-              variant="outline"
-              className="h-5 border-border bg-secondary text-[10px] font-semibold text-foreground px-2"
-            >
-              15-Day Trial
-            </Badge>
-          </div>
-          <p className="text-xs text-muted-foreground mt-1">
-            {stats?.totalDeals ?? 0} active deals • {formatCurrency(stats?.totalValue || 0)} pipeline • Target pace at {quotaPercentage}%
-          </p>
-        </div>
-
-        {/* Controls & Quick Actions */}
-        <div className="flex flex-wrap items-center gap-2">
-          {/* Period selector */}
-          <div className="flex rounded-lg bg-secondary p-0.5 border border-border">
-            {periods.map((p) => (
-              <Button
-                key={p.value}
-                variant={period === p.value ? "default" : "ghost"}
-                size="sm"
-                className={`h-7 text-xs px-2.5 rounded-md font-medium transition-all ${
-                  period === p.value
-                    ? "bg-foreground text-background shadow-xs font-semibold"
-                    : "text-muted-foreground hover:text-foreground"
-                }`}
-                onClick={() => setPeriod(p.value)}
-              >
-                {p.label}
-              </Button>
-            ))}
-          </div>
-
-          {/* Primary Action Button */}
-          <Button
-            size="sm"
-            onClick={() => setCreateDealOpen(true)}
-            className="h-8 rounded-lg bg-foreground text-background hover:bg-foreground/90 text-xs font-medium gap-1.5 shadow-xs px-3"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            <span>New Deal</span>
-          </Button>
-
-          {/* Secondary Actions Dropdown */}
+    <div className={cn("mx-auto max-w-[1600px] space-y-6", VIZ_VARS)}>
+      <PageBanner
+        title={firstName ? `${greeting(now)}, ${firstName}` : greeting(now)}
+        description={`${organization?.name ? `${organization.name} · ` : ""}${format(now, "EEEE, MMMM d")}`}
+      >
+        <div className="flex items-center gap-2">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-8 border-border hover:bg-secondary px-2.5 text-xs text-foreground"
-                title="More quick actions"
-              >
-                <MoreHorizontal className="h-4 w-4" />
+              <Button variant="outline" size="sm" className="gap-1">
+                Create
+                <ChevronDown className="h-3.5 w-3.5" aria-hidden />
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-48 text-xs">
-              <DropdownMenuItem onClick={() => setCreateContactOpen(true)}>
-                <UserPlus className="h-3.5 w-3.5 mr-2 text-muted-foreground" />
-                <span>Add Contact</span>
+            <DropdownMenuContent align="end" className="w-44">
+              <DropdownMenuItem onSelect={() => navigate("/contacts?new=1")}>
+                <UserPlus className="mr-2 h-4 w-4 text-muted-foreground" aria-hidden />
+                Contact
               </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => setLogActivityOpen(true)}>
-                <PhoneCall className="h-3.5 w-3.5 mr-2 text-muted-foreground" />
-                <span>Log Activity</span>
+              <DropdownMenuItem onSelect={() => navigate("/activities?new=1")}>
+                <Phone className="mr-2 h-4 w-4 text-muted-foreground" aria-hidden />
+                Activity
               </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => setCreateTaskOpen(true)}>
-                <CheckSquare className="h-3.5 w-3.5 mr-2 text-muted-foreground" />
-                <span>New Task</span>
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              {!isDemoMode && (
-                <DropdownMenuItem onClick={handleSeedGoom} disabled={seedingGoom}>
-                  <Building2 className="h-3.5 w-3.5 mr-2 text-muted-foreground" />
-                  <span>{seedingGoom ? "Seeding Goom..." : "Seed Goom Construction"}</span>
-                </DropdownMenuItem>
-              )}
-              {isDemoMode && (
-                <DropdownMenuItem onClick={handleResetSandbox}>
-                  <RotateCcw className="h-3.5 w-3.5 mr-2 text-muted-foreground" />
-                  <span>Reset Demo Data</span>
-                </DropdownMenuItem>
-              )}
-              <DropdownMenuItem onClick={() => setFeedbackOpen(true)}>
-                <MessageSquarePlus className="h-3.5 w-3.5 mr-2 text-muted-foreground" />
-                <span>Send Feedback</span>
+              <DropdownMenuItem onSelect={() => navigate("/tasks?new=1")}>
+                <CheckSquare className="mr-2 h-4 w-4 text-muted-foreground" aria-hidden />
+                Task
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-        </div>
-      </div>
-
-      {/* Executive Metric Row (4 Clean Cards) */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {statCards.map((stat) => (
-          <Card
-            key={stat.label}
-            className="border border-border bg-card p-4 shadow-xs transition-all hover:border-foreground/30"
-          >
-            <div className="flex items-center justify-between pb-1">
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                {stat.label}
-              </span>
-              <stat.icon className="h-4 w-4 text-muted-foreground" />
-            </div>
-
-            <div className="mt-2">
-              {isLoading ? (
-                <Skeleton className="h-8 w-24" />
-              ) : (
-                <div className="text-2xl font-semibold tracking-tight text-foreground">
-                  {stat.value}
-                </div>
-              )}
-              <p className="mt-1 text-[11px] text-muted-foreground">
-                {stat.delta}
-              </p>
-            </div>
-          </Card>
-        ))}
-      </div>
-
-      {/* Goom Construction Workspace Initializer Banner */}
-      {!isDemoMode && stats?.totalDeals === 0 && !isLoading && (
-        <div className="rounded-xl border border-border bg-secondary/30 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-xs animate-in fade-in duration-200">
-          <div className="flex items-start sm:items-center gap-3.5">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-foreground text-background shadow-xs shrink-0">
-              <Building2 className="h-5 w-5" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h3 className="text-sm font-bold text-foreground">Goom Construction Workspace</h3>
-                <Badge variant="outline" className="text-[9px] px-1.5 py-0 border-border bg-background font-mono">
-                  Ready to Seed
-                </Badge>
-              </div>
-              <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">
-                Initialize your commercial pipeline with 6 realistic development projects ($2,670,000 active pipeline), contacts, activities, and tasks.
-              </p>
-            </div>
-          </div>
-          <Button
-            size="sm"
-            onClick={handleSeedGoom}
-            disabled={seedingGoom}
-            className="h-9 px-4 bg-foreground text-background hover:bg-foreground/90 text-xs font-semibold gap-2 shadow-xs shrink-0 rounded-lg"
-          >
-            <Sparkles className="h-4 w-4 text-primary" />
-            <span>{seedingGoom ? "Seeding Goom Pipeline..." : "Seed Goom Construction Data"}</span>
+          <Button size="sm" className="gap-1.5" onClick={() => navigate("/pipeline?new=1")}>
+            <Plus className="h-4 w-4" aria-hidden />
+            New deal
           </Button>
         </div>
+      </PageBanner>
+
+      {!error && <GetStartedCard hasDeals={!!base?.hasDeals} loading={loading} />}
+
+      {error ? (
+        <ErrorState error={error} onRetry={retry} title="Couldn't load your dashboard" />
+      ) : (
+        <>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-2">
+              <span className="flex h-7 w-7 items-center justify-center rounded-md bg-secondary text-muted-foreground">
+                {teamView ? <Users className="h-3.5 w-3.5" aria-hidden /> : <UserRound className="h-3.5 w-3.5" aria-hidden />}
+              </span>
+              <div>
+                <h2 className="text-sm font-semibold text-foreground">{teamView ? "Team performance" : "Your performance"}</h2>
+                <p className="text-xs text-muted-foreground">
+                  {teamView ? "Every deal in the workspace" : "Deals you own or created"} · trends over the {rangePhrase}
+                </p>
+              </div>
+            </div>
+            <Segmented<RangeMonths>
+              label="Trend range"
+              value={rangeMonths}
+              onChange={setRangeMonths}
+              options={[
+                { value: "6", label: "6 months" },
+                { value: "12", label: "12 months" },
+              ]}
+            />
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <KpiCard
+              label="Won this month"
+              icon={Trophy}
+              loading={loading}
+              value={base ? money(base.thisMonth.value) : null}
+              hint="Value of deals moved to a won stage since the 1st, compared with the same days of last month."
+              delta={
+                base
+                  ? base.thisMonth.value === 0 && base.lastMonth.value === 0
+                    ? { value: null, label: "", fallback: "Nothing won this month or the same days last month" }
+                    : {
+                        value: base.monthDelta.pct,
+                        label: "vs same days last month",
+                        fallback: `${base.thisMonth.count} won · none in the same days last month`,
+                      }
+                  : null
+              }
+              trend={ranged?.series.map((p) => ({ label: p.label, value: p.wonValue, display: money(p.wonValue) }))}
+              trendLabel={`Won revenue per month, ${rangePhrase}`}
+            />
+            <KpiCard
+              label="Open pipeline"
+              icon={DollarSign}
+              loading={loading}
+              value={base ? money(base.openValue) : null}
+              sub={base ? `${base.openCount} ${base.openCount === 1 ? "deal" : "deals"} · ${money(base.weighted)} weighted` : undefined}
+              hint="Total value of every deal that isn't won or lost. Weighted = value × probability. The trend shows the value of new deals added each month."
+              trend={ranged?.series.map((p) => ({ label: p.label, value: p.createdValue, display: `${money(p.createdValue)} added` }))}
+              trendLabel={`New pipeline added per month, ${rangePhrase}`}
+            />
+            <KpiCard
+              label="Win rate"
+              icon={Percent}
+              loading={loading}
+              value={base && base.win.rate !== null ? formatPercent(base.win.rate) : null}
+              unavailableReason={`No deals were won or lost in the last ${WINDOW_DAYS} days.`}
+              hint={`Won ÷ (won + lost) for deals closed in the last ${WINDOW_DAYS} days, compared with the ${WINDOW_DAYS} days before.`}
+              delta={
+                base && base.win.rate !== null
+                  ? {
+                      value: rateDelta(base.win.rate, base.prevWin.rate),
+                      kind: "pp",
+                      label: `vs prior ${WINDOW_DAYS} days`,
+                      fallback: `${base.win.won} won · ${base.win.lost} lost · last ${WINDOW_DAYS} days`,
+                    }
+                  : null
+              }
+              trend={ranged?.series.map((p) => ({ label: p.label, value: p.winRate, display: p.winRate === null ? "nothing closed" : formatPercent(p.winRate) }))}
+              trendLabel={`Win rate per month, ${rangePhrase}`}
+            />
+            <KpiCard
+              label="Average deal size"
+              icon={Target}
+              loading={loading}
+              value={base && base.avgSize !== null ? money(base.avgSize) : null}
+              unavailableReason={`No deals were won in the last ${WINDOW_DAYS} days.`}
+              hint={`Average value of deals won in the last ${WINDOW_DAYS} days, compared with the ${WINDOW_DAYS} days before.`}
+              delta={
+                base && base.avgSize !== null
+                  ? {
+                      value: base.prevAvgSize ? periodDelta(base.avgSize, base.prevAvgSize).pct : null,
+                      label: `vs prior ${WINDOW_DAYS} days`,
+                      fallback: `Won deals · last ${WINDOW_DAYS} days`,
+                    }
+                  : null
+              }
+              trend={ranged?.series.map((p) => ({ label: p.label, value: p.avgDealSize, display: p.avgDealSize === null ? "no wins" : money(p.avgDealSize) }))}
+              trendLabel={`Average won deal size per month, ${rangePhrase}`}
+            />
+          </div>
+
+          <div className="grid gap-6 lg:grid-cols-12">
+            <RevenueTrendChart
+              className="lg:col-span-8"
+              title="Revenue trend"
+              description={`Won revenue per month, ${rangePhrase}, against the ${months} months before`}
+              points={ranged?.trend ?? []}
+              currency={currency}
+              loading={loading}
+              error={error}
+              onRetry={retry}
+              previousLabel={`Previous ${months} months`}
+              comparisonPhrase={`vs previous ${months} months`}
+              emptyAction={
+                <Button variant="outline" size="sm" onClick={() => navigate("/pipeline")}>
+                  Open pipeline
+                </Button>
+              }
+            />
+            <WinLossCard
+              className="lg:col-span-4"
+              description={`Deals closed in the ${rangePhrase}`}
+              won={ranged?.won ?? { count: 0, value: 0 }}
+              lost={ranged?.lost ?? { count: 0, value: 0 }}
+              series={ranged?.series}
+              currency={currency}
+              loading={loading}
+              error={error}
+              onRetry={retry}
+            />
+          </div>
+
+          <div className="grid gap-6 lg:grid-cols-12">
+            <PipelineFunnelChart
+              className="lg:col-span-7"
+              rows={funnel?.rows ?? []}
+              flow={funnel?.flow}
+              flowNote={flowNote}
+              currency={currency}
+              loading={loading}
+              error={error}
+              onRetry={retry}
+              pipelines={data?.pipelines}
+              pipelineId={funnel?.activePipelineId}
+              onPipelineChange={setPipelineId}
+              description={funnel?.flow?.hasHistory ? `Open deals by stage, with conversion for deals created in the ${rangePhrase}` : "Open deals in each stage right now"}
+              emptyAction={
+                <Button variant="outline" size="sm" onClick={() => navigate("/pipeline?new=1")}>
+                  New deal
+                </Button>
+              }
+            />
+            <div className="space-y-6 lg:col-span-5">
+              <ClosingSoon
+                deals={base?.closing ?? []}
+                currency={currency}
+                loading={loading}
+                error={error}
+                onRetry={retry}
+                onOpenDeal={(id) => navigate(`/pipeline?open=${id}`)}
+                probabilityOf={data ? (d) => effectiveProbability(d, data.stagesById) : undefined}
+                moreHref={hasForecast ? "/forecast" : "/pipeline"}
+              />
+              <MyTasks />
+            </div>
+          </div>
+
+          <div className="grid gap-6 lg:grid-cols-12">
+            <CloseMonthChart
+              className="lg:col-span-7"
+              months={base?.forecast.months ?? []}
+              overdue={{ count: base?.forecast.overdue.length ?? 0, value: sumValue(base?.forecast.overdue ?? []) }}
+              noDateCount={base?.forecast.noCloseDate.length ?? 0}
+              currency={currency}
+              loading={loading}
+              error={error}
+              onRetry={retry}
+              forecastHref={hasForecast ? "/forecast" : undefined}
+            />
+            <div className="lg:col-span-5">
+              <RecentActivity />
+            </div>
+          </div>
+        </>
       )}
-
-      {/* 2-Column Balanced Dashboard Layout */}
-      <div className="grid gap-6 lg:grid-cols-12">
-        {/* Left Column (7 cols): Trend Graph + Pipeline Stage Funnel Graph */}
-        <div className="space-y-6 lg:col-span-7">
-          <RevenueTrendChart
-            period={period}
-            deals={stats?.deals || []}
-            onCreateDeal={() => setCreateDealOpen(true)}
-          />
-          <PipelineFunnelChart
-            stages={stats?.funnelStages || []}
-            deals={stats?.deals || []}
-            totalDeals={stats?.totalDeals || 0}
-            totalValue={stats?.totalValue || 0}
-            onSelectDeal={handleOpenDealById}
-          />
-        </div>
-
-        {/* Right Column (5 cols): Action Radar (Closing Soon & Tasks) + Activity Stream */}
-        <div className="space-y-6 lg:col-span-5">
-          <ClosingSoon since={since} onSelectDeal={handleOpenDealById} />
-          <RecentActivity since={since} />
-        </div>
-      </div>
-
-      {/* IN-PLACE MODALS - All Actions Function Seamlessly Without Page Reload */}
-      <CreateDealDialog
-        open={createDealOpen}
-        onOpenChange={setCreateDealOpen}
-        pipelineId={activePipeline?.id || "demo-pipeline"}
-        stages={effectiveStages}
-      />
-
-      <CreateContactDialog
-        open={createContactOpen}
-        onOpenChange={setCreateContactOpen}
-      />
-
-      <LogActivityDialog
-        open={logActivityOpen}
-        onOpenChange={setLogActivityOpen}
-      />
-
-      <CreateTaskDialog
-        open={createTaskOpen}
-        onOpenChange={setCreateTaskOpen}
-      />
-
-      <DealDetailSheet
-        deal={selectedDealForSheet}
-        open={!!selectedDealForSheet}
-        onOpenChange={(open) => !open && setSelectedDealForSheet(null)}
-        stages={effectiveStages}
-      />
-
-      <BetaFeedbackDialog open={feedbackOpen} onOpenChange={setFeedbackOpen} />
     </div>
   );
 }

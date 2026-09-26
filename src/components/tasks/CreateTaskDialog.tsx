@@ -1,128 +1,95 @@
-import { useState } from "react";
-import { useAuth } from "@/contexts/AuthContext";
-import { useCreateTask } from "@/hooks/useTasks";
-import { useContacts } from "@/hooks/useContacts";
-import { useQuery } from "@tanstack/react-query";
-import { supabase } from "@/integrations/supabase/client";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { useToast } from "@/hooks/use-toast";
+import { useEffect } from "react";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
 import { Loader2 } from "lucide-react";
+import { useAuth } from "@/contexts/AuthContext";
+import { useCreateTask, type Task } from "@/hooks/useTasks";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { useToast } from "@/hooks/use-toast";
+import { errorMessage } from "@/components/settings/validation";
+import { TaskFormFields } from "./TaskFormFields";
+import { dueDateToIso, taskFormSchema, type TaskFormValues } from "./taskUtils";
 
 interface CreateTaskDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   defaultDealId?: string;
   defaultContactId?: string;
+  /** Prefill the due date (yyyy-MM-dd), e.g. from the calendar. */
+  defaultDueDate?: string;
+  defaultAssigneeId?: string | null;
+  onCreated?: (task: Task) => void;
 }
 
-export function CreateTaskDialog({ open, onOpenChange, defaultDealId, defaultContactId }: CreateTaskDialogProps) {
+export function CreateTaskDialog({ open, onOpenChange, defaultDealId, defaultContactId, defaultDueDate, defaultAssigneeId, onCreated }: CreateTaskDialogProps) {
   const { user } = useAuth();
-  const createTask = useCreateTask();
   const { toast } = useToast();
-  const { data: contacts } = useContacts();
-  const { data: deals } = useQuery({
-    queryKey: ["all-deals-for-picker"],
-    queryFn: async () => {
-      const { data, error } = await supabase.from("deals").select("id, title").order("title");
-      if (error) throw error;
-      return data;
-    },
+  const createTask = useCreateTask();
+
+  const defaults = (): TaskFormValues => ({
+    title: "",
+    description: "",
+    due_date: defaultDueDate ?? "",
+    due_time: "",
+    priority: "medium",
+    assigned_to: defaultAssigneeId ?? user?.id ?? null,
+    deal_id: defaultDealId ?? null,
+    contact_id: defaultContactId ?? null,
   });
+  const form = useForm<TaskFormValues>({ resolver: zodResolver(taskFormSchema), defaultValues: defaults() });
 
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
-  const [dueDate, setDueDate] = useState("");
-  const [priority, setPriority] = useState("medium");
-  const [dealId, setDealId] = useState(defaultDealId || "");
-  const [contactId, setContactId] = useState(defaultContactId || "");
+  useEffect(() => {
+    if (open) form.reset(defaults());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, defaultDealId, defaultContactId, defaultDueDate, defaultAssigneeId]);
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!user) return;
+  const onSubmit = (v: TaskFormValues) => {
     createTask.mutate(
       {
-        user_id: user.id,
-        title,
-        description: description || null,
-        due_date: dueDate || null,
-        priority,
-        deal_id: dealId && dealId !== "none" ? dealId : null,
-        contact_id: contactId && contactId !== "none" ? contactId : null,
+        user_id: user?.id,
+        assigned_to: v.assigned_to,
+        title: v.title.trim(),
+        description: v.description.trim() || null,
+        due_date: dueDateToIso(v.due_date, v.due_time),
+        priority: v.priority,
+        deal_id: v.deal_id,
+        contact_id: v.contact_id,
       },
       {
-        onSuccess: () => {
-          toast({ title: "Task created" });
+        onSuccess: (task) => {
+          toast({ title: "Task created", description: task.title, variant: "success" });
           onOpenChange(false);
-          setTitle(""); setDescription(""); setDueDate(""); setPriority("medium");
-          setDealId(defaultDealId || ""); setContactId(defaultContactId || "");
+          onCreated?.(task);
         },
-      }
+        onError: (err) => toast({ title: "Couldn't create task", description: errorMessage(err), variant: "destructive" }),
+      },
     );
   };
 
+  const pending = createTask.isPending;
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader><DialogTitle>Create Task</DialogTitle></DialogHeader>
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="space-y-2">
-            <Label>Title *</Label>
-            <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Follow up with client" required maxLength={200} />
-          </div>
-          <div className="space-y-2">
-            <Label>Description</Label>
-            <Textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} maxLength={2000} />
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label>Due Date</Label>
-              <Input type="datetime-local" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
-            </div>
-            <div className="space-y-2">
-              <Label>Priority</Label>
-              <Select value={priority} onValueChange={setPriority}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="low">Low</SelectItem>
-                  <SelectItem value="medium">Medium</SelectItem>
-                  <SelectItem value="high">High</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-          {!defaultDealId && (
-            <div className="space-y-2">
-              <Label>Link to Deal</Label>
-              <Select value={dealId} onValueChange={setDealId}>
-                <SelectTrigger><SelectValue placeholder="None" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">None</SelectItem>
-                  {deals?.map((d) => <SelectItem key={d.id} value={d.id}>{d.title}</SelectItem>)}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
-          {!defaultContactId && (
-            <div className="space-y-2">
-              <Label>Link to Contact</Label>
-              <Select value={contactId} onValueChange={setContactId}>
-                <SelectTrigger><SelectValue placeholder="None" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">None</SelectItem>
-                  {contacts?.map((c) => <SelectItem key={c.id} value={c.id}>{c.first_name} {c.last_name}</SelectItem>)}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
-          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-            <Button type="submit" disabled={createTask.isPending}>
-              {createTask.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Create Task"}
+    <Dialog open={open} onOpenChange={(o) => !pending && onOpenChange(o)}>
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>New task</DialogTitle>
+          <DialogDescription>Assign a to-do and link it to a deal or contact.</DialogDescription>
+        </DialogHeader>
+        <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4" noValidate>
+          <TaskFormFields form={form} idPrefix="new-task" autoFocus />
+          <div className="flex flex-col-reverse gap-2 pt-1 sm:flex-row sm:justify-end">
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={pending}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={pending}>
+              {pending ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Creating…
+                </>
+              ) : (
+                "Create task"
+              )}
             </Button>
           </div>
         </form>

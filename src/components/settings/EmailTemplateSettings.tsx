@@ -1,122 +1,197 @@
 import { useState } from "react";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { z } from "zod";
+import { toast } from "sonner";
+import { Loader2, Mail, Pencil, Plus, Trash2 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
-import { useEmailTemplates, useCreateEmailTemplate, useUpdateEmailTemplate, useDeleteEmailTemplate, EmailTemplate } from "@/hooks/useEmailTemplates";
+import {
+  useCreateEmailTemplate,
+  useDeleteEmailTemplate,
+  useEmailTemplates,
+  useUpdateEmailTemplate,
+  type EmailTemplate,
+} from "@/hooks/useEmailTemplates";
+import { useConfirm } from "@/components/common/ConfirmDialog";
+import { EmptyState, ErrorState, ListSkeleton } from "@/components/common/States";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Card, CardContent } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
-import { useToast } from "@/hooks/use-toast";
-import { Plus, Pencil, Trash2, Mail } from "lucide-react";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { FieldError, SettingsSection } from "./shared";
+import { errorMessage } from "./validation";
+
+const schema = z.object({
+  name: z.string().trim().min(1, "Name is required").max(80, "Keep it under 80 characters"),
+  subject: z.string().trim().min(1, "Subject is required").max(200, "Keep it under 200 characters"),
+  body: z.string().trim().min(1, "Body is required").max(10_000, "Keep it under 10,000 characters"),
+});
+type Values = z.infer<typeof schema>;
 
 export function EmailTemplateSettings() {
-  const { user } = useAuth();
-  const { data: templates, isLoading } = useEmailTemplates();
-  const createTemplate = useCreateEmailTemplate();
-  const updateTemplate = useUpdateEmailTemplate();
-  const deleteTemplate = useDeleteEmailTemplate();
-  const { toast } = useToast();
+  const templates = useEmailTemplates();
+  const remove = useDeleteEmailTemplate();
+  const confirm = useConfirm();
+  const [editing, setEditing] = useState<{ template: EmailTemplate | null } | null>(null);
 
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [editing, setEditing] = useState<EmailTemplate | null>(null);
-  const [name, setName] = useState("");
-  const [subject, setSubject] = useState("");
-  const [body, setBody] = useState("");
-
-  const openNew = () => { setEditing(null); setName(""); setSubject(""); setBody(""); setDialogOpen(true); };
-  const openEdit = (t: EmailTemplate) => { setEditing(t); setName(t.name); setSubject(t.subject); setBody(t.body); setDialogOpen(true); };
-
-  const handleSave = () => {
-    if (!user) return;
-    if (editing) {
-      updateTemplate.mutate({ id: editing.id, name, subject, body }, {
-        onSuccess: () => { toast({ title: "Template updated" }); setDialogOpen(false); },
-      });
-    } else {
-      createTemplate.mutate({ user_id: user.id, name, subject, body }, {
-        onSuccess: () => { toast({ title: "Template created" }); setDialogOpen(false); },
-      });
+  const deleteTemplate = async (t: EmailTemplate) => {
+    const ok = await confirm({ title: `Delete "${t.name}"?`, description: "This can't be undone.", confirmLabel: "Delete template" });
+    if (!ok) return;
+    try {
+      await remove.mutateAsync(t.id);
+      toast.success("Template deleted");
+    } catch (err) {
+      toast.error(errorMessage(err));
     }
   };
 
-  return (
-    <div className="space-y-4 max-w-2xl">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <p className="text-sm text-muted-foreground">Create reusable email templates for activities.</p>
-        <Button size="sm" onClick={openNew}><Plus className="h-4 w-4 mr-1" /> New Template</Button>
-      </div>
+  const newButton = (
+    <Button onClick={() => setEditing({ template: null })} className="gap-1.5">
+      <Plus className="h-4 w-4" /> New template
+    </Button>
+  );
 
-      {isLoading ? (
-        <p className="text-sm text-muted-foreground">Loading...</p>
-      ) : !templates?.length ? (
-        <div className="flex flex-col items-center py-12">
-          <Mail className="h-10 w-10 text-muted-foreground/40 mb-2" />
-          <p className="text-sm text-muted-foreground">No templates yet.</p>
-        </div>
+  return (
+    <SettingsSection
+      title="Email templates"
+      description="Reusable emails you can insert when logging an email activity."
+    >
+      {templates.isLoading ? (
+        <ListSkeleton rows={3} />
+      ) : templates.isError ? (
+        <ErrorState compact error={templates.error} title="Couldn't load templates" onRetry={() => templates.refetch()} />
+      ) : !templates.data?.length ? (
+        <EmptyState
+          compact
+          icon={Mail}
+          title="No templates yet"
+          description="Save the follow-ups and intros you send most often."
+          action={newButton}
+        />
       ) : (
-        <div className="space-y-2">
-          {templates.map((t) => (
-            <Card key={t.id}>
-              <CardContent className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between p-4">
-                <div>
-                  <p className="font-medium text-sm">{t.name}</p>
-                  <p className="text-xs text-muted-foreground">Subject: {t.subject}</p>
-                </div>
-                <div className="flex gap-1">
-                  <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openEdit(t)}>
-                    <Pencil className="h-3.5 w-3.5" />
-                  </Button>
-                  <AlertDialog>
-                    <AlertDialogTrigger asChild>
-                      <Button variant="ghost" size="icon" className="h-8 w-8">
-                        <Trash2 className="h-3.5 w-3.5 text-destructive" />
+        <div className="space-y-4">
+          <ul className="divide-y divide-border rounded-lg border border-border">
+            {templates.data.map((t) => (
+              <li key={t.id} className="flex items-center gap-3 p-3">
+                <button
+                  type="button"
+                  className="min-w-0 flex-1 rounded-sm text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  onClick={() => setEditing({ template: t })}
+                >
+                  <p className="truncate text-sm font-medium">{t.name}</p>
+                  <p className="truncate text-xs text-muted-foreground">{t.subject}</p>
+                </button>
+                <div className="flex shrink-0 items-center">
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button variant="ghost" size="icon" className="h-8 w-8" aria-label={`Edit ${t.name}`} onClick={() => setEditing({ template: t })}>
+                        <Pencil className="h-4 w-4" />
                       </Button>
-                    </AlertDialogTrigger>
-                    <AlertDialogContent>
-                      <AlertDialogHeader>
-                        <AlertDialogTitle>Delete template?</AlertDialogTitle>
-                        <AlertDialogDescription>This cannot be undone.</AlertDialogDescription>
-                      </AlertDialogHeader>
-                      <AlertDialogFooter>
-                        <AlertDialogCancel>Cancel</AlertDialogCancel>
-                        <AlertDialogAction onClick={() => deleteTemplate.mutate(t.id)}>Delete</AlertDialogAction>
-                      </AlertDialogFooter>
-                    </AlertDialogContent>
-                  </AlertDialog>
+                    </TooltipTrigger>
+                    <TooltipContent>Edit</TooltipContent>
+                  </Tooltip>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                        aria-label={`Delete ${t.name}`}
+                        disabled={remove.isPending && remove.variables === t.id}
+                        onClick={() => deleteTemplate(t)}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>Delete</TooltipContent>
+                  </Tooltip>
                 </div>
-              </CardContent>
-            </Card>
-          ))}
+              </li>
+            ))}
+          </ul>
+          {newButton}
         </div>
       )}
 
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent>
-          <DialogHeader><DialogTitle>{editing ? "Edit Template" : "New Template"}</DialogTitle></DialogHeader>
-          <div className="space-y-4">
-            <div className="space-y-2">
-              <Label>Name</Label>
-              <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Follow-up Email" />
-            </div>
-            <div className="space-y-2">
-              <Label>Subject</Label>
-              <Input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Email subject line" />
-            </div>
-            <div className="space-y-2">
-              <Label>Body</Label>
-              <Textarea value={body} onChange={(e) => setBody(e.target.value)} rows={6} placeholder="Email body content..." />
-            </div>
-            <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button>
-              <Button onClick={handleSave} disabled={!name || !subject || !body}>
-                {editing ? "Update" : "Create"}
-              </Button>
-            </div>
+      {editing && <TemplateDialog template={editing.template} onClose={() => setEditing(null)} />}
+    </SettingsSection>
+  );
+}
+
+function TemplateDialog({ template, onClose }: { template: EmailTemplate | null; onClose: () => void }) {
+  const { user } = useAuth();
+  const create = useCreateEmailTemplate();
+  const update = useUpdateEmailTemplate();
+  const { register, handleSubmit, formState } = useForm<Values>({
+    resolver: zodResolver(schema),
+    defaultValues: { name: template?.name ?? "", subject: template?.subject ?? "", body: template?.body ?? "" },
+  });
+
+  const onSubmit = handleSubmit(async (values) => {
+    try {
+      if (template) {
+        await update.mutateAsync({ id: template.id, name: values.name, subject: values.subject, body: values.body });
+        toast.success("Template saved");
+      } else {
+        if (!user) throw new Error("Not signed in");
+        await create.mutateAsync({ user_id: user.id, name: values.name, subject: values.subject, body: values.body });
+        toast.success("Template created");
+      }
+      onClose();
+    } catch (err) {
+      toast.error(errorMessage(err));
+    }
+  });
+
+  return (
+    <Dialog open onOpenChange={(open) => !open && !formState.isSubmitting && onClose()}>
+      <DialogContent className="sm:max-w-lg">
+        <form onSubmit={onSubmit} noValidate className="space-y-4">
+          <DialogHeader>
+            <DialogTitle>{template ? "Edit template" : "New template"}</DialogTitle>
+            <DialogDescription>Keep it short — you can personalize it before sending.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-1.5">
+            <Label htmlFor="tpl-name">
+              Name <span className="text-destructive" aria-hidden>*</span>
+            </Label>
+            <Input id="tpl-name" autoFocus placeholder="e.g. Follow-up after demo" aria-invalid={!!formState.errors.name} {...register("name")} />
+            <FieldError message={formState.errors.name?.message} />
           </div>
-        </DialogContent>
-      </Dialog>
-    </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="tpl-subject">
+              Subject <span className="text-destructive" aria-hidden>*</span>
+            </Label>
+            <Input id="tpl-subject" aria-invalid={!!formState.errors.subject} {...register("subject")} />
+            <FieldError message={formState.errors.subject?.message} />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="tpl-body">
+              Body <span className="text-destructive" aria-hidden>*</span>
+            </Label>
+            <Textarea id="tpl-body" rows={8} aria-invalid={!!formState.errors.body} {...register("body")} />
+            <FieldError message={formState.errors.body?.message} />
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button type="button" variant="outline" onClick={onClose} disabled={formState.isSubmitting}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={formState.isSubmitting}>
+              {formState.isSubmitting ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" /> Saving…
+                </>
+              ) : template ? (
+                "Save template"
+              ) : (
+                "Create template"
+              )}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }

@@ -1,101 +1,94 @@
-import { useState } from "react";
-import { useActivities } from "@/hooks/useActivities";
-import { ActivityItem } from "@/components/activities/ActivityItem";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
-import { getDemoActivities } from "@/lib/demoData";
-import { useAuth } from "@/contexts/AuthContext";
-import { Activity, Phone, Mail, Calendar, FileText, ArrowUpRight } from "lucide-react";
 import { Link } from "react-router-dom";
+import { Activity as ActivityIcon, ArrowUpRight, Calendar, FileText, Mail, Phone } from "lucide-react";
+import { useActivities } from "@/hooks/useActivities";
+import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
+import { EmptyState, ErrorState } from "@/components/common/States";
+import { formatRelativeDate } from "@/lib/formatters";
+import { SectionCard } from "./ChartParts";
+import { ACTIVITY_SERIES } from "./chartTheme";
 
-export function RecentActivity({ since }: { since?: string | null }) {
-  const { isDemoMode } = useAuth();
-  const [filterType, setFilterType] = useState<string>("all");
-  const { data: rawActivities, isLoading } = useActivities({ limit: 8, since: since || undefined });
+const TYPE_COLOR = Object.fromEntries(ACTIVITY_SERIES.map((s) => [s.key, s.color])) as Record<string, string>;
 
-  // Use demo activities only when explicitly in demo mode
-  const activities = isDemoMode
-    ? getDemoActivities().map((a) => ({
-        id: a.id,
-        title: a.title,
-        type: a.type,
-        description: a.description,
-        created_at: a.created_at,
-        deals: a.deal_title ? { title: a.deal_title } : undefined,
-        contacts: a.contact_name
-          ? { first_name: a.contact_name.split(" ")[0], last_name: a.contact_name.split(" ")[1] || "" }
-          : undefined,
-      }))
-    : (rawActivities || []);
+const TYPE_META: Record<string, { icon: typeof Phone; label: string }> = {
+  call: { icon: Phone, label: "Call" },
+  email: { icon: Mail, label: "Email" },
+  meeting: { icon: Calendar, label: "Meeting" },
+  note: { icon: FileText, label: "Note" },
+};
 
-  const filteredActivities =
-    filterType === "all"
-      ? activities
-      : activities.filter((a: any) => a.type === filterType);
+/** The workspace's latest logged activities. */
+export function RecentActivity({ limit = 6 }: { limit?: number }) {
+  const { data, isLoading, isError, error, refetch } = useActivities({ limit });
 
   return (
-    <Card className="border border-border/80 bg-card shadow-sm">
-      <CardHeader className="flex flex-row items-center justify-between pb-3 pt-4">
-        <div className="flex items-center gap-2">
-          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-secondary text-foreground">
-            <Activity className="h-4 w-4" />
-          </div>
-          <div>
-            <CardTitle className="text-sm font-semibold tracking-tight">
-              Live Activity Stream
-            </CardTitle>
-            <p className="text-[11px] text-muted-foreground">Touchpoints, call logs, and customer updates</p>
-          </div>
-        </div>
-
-        <Button asChild variant="ghost" size="sm" className="h-7 text-xs text-muted-foreground hover:text-foreground">
+    <SectionCard
+      title="Recent activity"
+      description="Latest calls, emails, meetings and notes"
+      action={
+        <Button asChild variant="ghost" size="sm" className="h-8 gap-1 text-xs text-muted-foreground">
           <Link to="/activities">
-            <span>All Logs</span>
-            <ArrowUpRight className="h-3.5 w-3.5 ml-1" />
+            All activity <ArrowUpRight className="h-3.5 w-3.5" aria-hidden />
           </Link>
         </Button>
-      </CardHeader>
-
-      <CardContent className="space-y-3 pt-1">
-        {/* Type Filter Pills */}
-        <div className="flex flex-wrap items-center gap-1 border-b border-border/60 pb-2.5">
-          {[
-            { id: "all", label: "All Activity" },
-            { id: "call", label: "Calls", icon: Phone },
-            { id: "email", label: "Emails", icon: Mail },
-            { id: "meeting", label: "Meetings", icon: Calendar },
-            { id: "note", label: "Notes", icon: FileText },
-          ].map((item) => (
-            <button
-              key={item.id}
-              onClick={() => setFilterType(item.id)}
-              className={`flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-all ${
-                filterType === item.id
-                  ? "bg-foreground text-background font-semibold"
-                  : "text-muted-foreground hover:bg-secondary hover:text-foreground"
-              }`}
-            >
-              {item.icon && <item.icon className="h-3 w-3" />}
-              <span>{item.label}</span>
-            </button>
+      }
+    >
+      {isLoading ? (
+        <div className="space-y-3">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="flex items-center gap-3">
+              <Skeleton className="h-8 w-8 rounded-full" />
+              <div className="flex-1 space-y-1.5">
+                <Skeleton className="h-3.5 w-2/3" />
+                <Skeleton className="h-3 w-1/3" />
+              </div>
+            </div>
           ))}
         </div>
-
-        {isLoading ? (
-          Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-14 w-full" />)
-        ) : !filteredActivities || filteredActivities.length === 0 ? (
-          <p className="py-6 text-center text-xs text-muted-foreground">
-            No activities recorded in this category.
-          </p>
-        ) : (
-          <div className="space-y-2.5">
-            {filteredActivities.slice(0, 5).map((a: any) => (
-              <ActivityItem key={a.id} activity={a} />
-            ))}
-          </div>
-        )}
-      </CardContent>
-    </Card>
+      ) : isError ? (
+        <ErrorState compact error={error} onRetry={() => refetch()} title="Couldn't load activity" />
+      ) : !data || data.length === 0 ? (
+        <EmptyState
+          compact
+          icon={ActivityIcon}
+          title="No activity yet"
+          description="Log calls, emails and meetings to keep your team in the loop."
+          action={
+            <Button asChild variant="outline" size="sm">
+              <Link to="/activities?new=1">Log activity</Link>
+            </Button>
+          }
+        />
+      ) : (
+        <ol className="relative space-y-3 before:absolute before:bottom-3 before:left-4 before:top-3 before:w-px before:bg-border">
+          {data.map((a) => {
+            const meta = TYPE_META[a.type] ?? TYPE_META.note;
+            const Icon = meta.icon;
+            const about =
+              a.deals?.title ?? (a.contacts ? `${a.contacts.first_name} ${a.contacts.last_name ?? ""}`.trim() : null);
+            return (
+              <li key={a.id} className="flex items-start gap-3">
+                <span className="relative mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-border bg-card text-foreground">
+                  <Icon className="h-3.5 w-3.5" aria-hidden />
+                  <span
+                    aria-hidden
+                    className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full ring-2 ring-card"
+                    style={{ backgroundColor: TYPE_COLOR[a.type] ?? TYPE_COLOR.note }}
+                  />
+                  <span className="sr-only">{meta.label}</span>
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm text-foreground">{a.title}</p>
+                  <p className="truncate text-xs text-muted-foreground">
+                    {meta.label}
+                    {about ? ` · ${about}` : ""} · <time dateTime={a.created_at}>{formatRelativeDate(a.created_at)}</time>
+                  </p>
+                </div>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+    </SectionCard>
   );
 }

@@ -2,45 +2,61 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Goom design tokens.
+ * Warm neutral canvas, near-black primary, Poppins. Every color is an HSL triplet consumed as
+ * `hsl(var(--token))` so Tailwind opacity modifiers (`bg-success/10`) work.
+ * Text tokens are tuned for WCAG AA against --background, --card and --muted in both themes.
+ */
 @layer base {
   :root {
     --background: 43 26% 95%;
-    --foreground: 0 0% 5%;
+    --foreground: 30 6% 8%;
 
     --card: 0 0% 100%;
-    --card-foreground: 0 0% 5%;
+    --card-foreground: 30 6% 8%;
 
     --popover: 0 0% 100%;
-    --popover-foreground: 0 0% 5%;
+    --popover-foreground: 30 6% 8%;
 
-    --primary: 0 0% 5%;
-    --primary-foreground: 43 26% 95%;
+    --primary: 30 6% 8%;
+    --primary-foreground: 43 26% 97%;
 
-    --secondary: 39 18% 89%;
-    --secondary-foreground: 0 0% 12%;
+    --secondary: 40 18% 90%;
+    --secondary-foreground: 30 6% 12%;
 
-    --muted: 39 18% 89%;
-    --muted-foreground: 0 0% 38%;
+    --muted: 40 18% 90%;
+    --muted-foreground: 30 4% 36%;
 
-    --accent: 39 18% 89%;
-    --accent-foreground: 0 0% 5%;
+    --accent: 40 18% 90%;
+    --accent-foreground: 30 6% 8%;
 
-    --destructive: 0 72% 51%;
+    --destructive: 0 72% 45%;
     --destructive-foreground: 0 0% 100%;
 
-    --border: 38 12% 82%;
-    --input: 38 12% 82%;
-    --ring: 0 0% 15%;
+    --success: 152 62% 30%;
+    --success-foreground: 0 0% 100%;
 
-    --radius: 0.75rem;
+    --warning: 30 88% 38%;
+    --warning-foreground: 0 0% 100%;
 
-    /* Landing page surface & data colors */
-    --surface-mint: 39 18% 89%;
-    --surface-mint-strong: 38 14% 82%;
-    --teal-data: 0 0% 18%;
-    --teal-dark: 0 0% 5%;
+    --info: 214 78% 44%;
+    --info-foreground: 0 0% 100%;
 
-    /* Pipeline stage colors in refined warm tones */
+    --border: 38 14% 84%;
+    --input: 38 12% 78%;
+    --ring: 30 6% 12%;
+
+    --radius: 0.625rem;
+
+    /* Categorical chart palette (ordered; distinguishable in both themes) */
+    --chart-1: 30 6% 14%;
+    --chart-2: 214 70% 50%;
+    --chart-3: 152 55% 38%;
+    --chart-4: 32 88% 50%;
+    --chart-5: 262 50% 56%;
+
+    /* Pipeline stage fallbacks (stage colors normally come from data) */
     --stage-prospect: 215 75% 52%;
     --stage-qualified: 260 60% 58%;
     --stage-proposal: 22 92% 52%;
@@ -48,85 +64,99 @@
     --stage-won: 155 65% 38%;
     --stage-lost: 0 65% 50%;
 
-    /* Sidebar — warm surface matching landing page header */
     --sidebar-background: 43 24% 93%;
-    --sidebar-foreground: 0 0% 12%;
-    --sidebar-primary: 0 0% 5%;
-    --sidebar-primary-foreground: 43 26% 95%;
-    --sidebar-accent: 39 16% 87%;
-    --sidebar-accent-foreground: 0 0% 5%;
-    --sidebar-border: 38 12% 82%;
-    --sidebar-ring: 0 0% 15%;
+    --sidebar-foreground: 30 6% 14%;
+    --sidebar-primary: 30 6% 8%;
+    --sidebar-primary-foreground: 43 26% 97%;
+    --sidebar-accent: 40 17% 87%;
+    --sidebar-accent-foreground: 30 6% 8%;
+    --sidebar-border: 38 14% 84%;
+    --sidebar-ring: 30 6% 12%;
   }
 
   .dark {
-    --background: 40 6% 9%;
-    --foreground: 43 20% 95%;
+    --background: 30 5% 8%;
+    --foreground: 40 18% 94%;
 
-    --card: 40 6% 12%;
-    --card-foreground: 43 20% 95%;
+    --card: 30 5% 11%;
+    --card-foreground: 40 18% 94%;
 
-    --popover: 40 6% 12%;
-    --popover-foreground: 43 20% 95%;
+    --popover: 30 5% 12%;
+    --popover-foreground: 40 18% 94%;
 
-    --primary: 43 26% 95%;
-    --primary-foreground: 40 6% 9%;
+    --primary: 40 18% 94%;
+    --primary-foreground: 30 5% 9%;
 
-    --secondary: 40 5% 18%;
-    --secondary-foreground: 43 20% 95%;
+    --secondary: 30 4% 17%;
+    --secondary-foreground: 40 18% 94%;
 
-    --muted: 40 5% 18%;
-    --muted-foreground: 40 6% 56%;
+    --muted: 30 4% 16%;
+    --muted-foreground: 36 6% 64%;
 
-    --accent: 40 5% 18%;
-    --accent-foreground: 43 20% 95%;
+    --accent: 30 4% 18%;
+    --accent-foreground: 40 18% 94%;
 
-    --destructive: 0 62% 35%;
+    --destructive: 0 72% 58%;
     --destructive-foreground: 0 0% 100%;
 
-    --border: 40 5% 20%;
-    --input: 40 5% 20%;
-    --ring: 43 26% 95%;
+    --success: 152 50% 50%;
+    --success-foreground: 30 5% 8%;
 
-    --surface-mint: 40 5% 16%;
-    --surface-mint-strong: 40 6% 22%;
-    --teal-data: 43 20% 90%;
-    --teal-dark: 43 26% 95%;
+    --warning: 36 90% 60%;
+    --warning-foreground: 30 5% 8%;
 
-    --sidebar-background: 40 6% 10%;
-    --sidebar-foreground: 43 15% 85%;
-    --sidebar-primary: 43 26% 95%;
-    --sidebar-primary-foreground: 40 6% 9%;
-    --sidebar-accent: 40 5% 16%;
-    --sidebar-accent-foreground: 43 20% 95%;
-    --sidebar-border: 40 5% 18%;
-    --sidebar-ring: 43 26% 95%;
+    --info: 212 88% 66%;
+    --info-foreground: 30 5% 8%;
+
+    --border: 30 4% 22%;
+    --input: 30 4% 27%;
+    --ring: 40 18% 90%;
+
+    --chart-1: 40 18% 88%;
+    --chart-2: 213 77% 56%;
+    --chart-3: 159 73% 36%;
+    --chart-4: 17 70% 50%;
+    --chart-5: 247 69% 72%;
+
+    --sidebar-background: 30 5% 9.5%;
+    --sidebar-foreground: 40 12% 86%;
+    --sidebar-primary: 40 18% 94%;
+    --sidebar-primary-foreground: 30 5% 9%;
+    --sidebar-accent: 30 4% 16%;
+    --sidebar-accent-foreground: 40 18% 94%;
+    --sidebar-border: 30 4% 19%;
+    --sidebar-ring: 40 18% 90%;
   }
 }
 
-/* Force light theme on landing page regardless of dark mode */
+/* Marketing pages always render in the light palette, regardless of the app theme. */
 .force-light {
+  color-scheme: light;
   --background: 43 26% 95%;
-  --foreground: 0 0% 5%;
+  --foreground: 30 6% 8%;
   --card: 0 0% 100%;
-  --card-foreground: 0 0% 5%;
+  --card-foreground: 30 6% 8%;
   --popover: 0 0% 100%;
-  --popover-foreground: 0 0% 5%;
-  --primary: 0 0% 5%;
-  --primary-foreground: 43 26% 95%;
-  --secondary: 39 18% 89%;
-  --secondary-foreground: 0 0% 18%;
-  --muted: 39 18% 89%;
-  --muted-foreground: 0 0% 38%;
-  --accent: 39 18% 89%;
-  --accent-foreground: 0 0% 5%;
-  --border: 38 12% 82%;
-  --input: 38 12% 82%;
-  --ring: 0 0% 18%;
-  --surface-mint: 39 18% 89%;
-  --surface-mint-strong: 38 14% 82%;
-  --teal-data: 0 0% 18%;
-  --teal-dark: 0 0% 5%;
+  --popover-foreground: 30 6% 8%;
+  --primary: 30 6% 8%;
+  --primary-foreground: 43 26% 97%;
+  --secondary: 40 18% 90%;
+  --secondary-foreground: 30 6% 12%;
+  --muted: 40 18% 90%;
+  --muted-foreground: 30 4% 36%;
+  --accent: 40 18% 90%;
+  --accent-foreground: 30 6% 8%;
+  --destructive: 0 72% 45%;
+  --destructive-foreground: 0 0% 100%;
+  --success: 152 62% 30%;
+  --success-foreground: 0 0% 100%;
+  --warning: 30 88% 38%;
+  --warning-foreground: 0 0% 100%;
+  --info: 214 78% 44%;
+  --info-foreground: 0 0% 100%;
+  --border: 38 14% 84%;
+  --input: 38 12% 78%;
+  --ring: 30 6% 12%;
 }
 
 @layer base {
@@ -134,23 +164,54 @@
     @apply border-border;
   }
 
+  html {
+    color-scheme: light;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  html.dark {
+    color-scheme: dark;
+  }
+
   body {
-    @apply bg-background text-foreground;
-    font-family: 'Poppins', sans-serif;
-    -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
+    @apply bg-background text-foreground antialiased;
+    font-family: "Poppins", ui-sans-serif, system-ui, sans-serif;
+    font-feature-settings: "ss01", "cv11";
+    text-rendering: optimizeLegibility;
   }
 
-  h1, h2, h3, h4, h5, h6 {
-    font-family: 'Poppins', sans-serif;
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
     font-weight: 600;
-    letter-spacing: -0.025em;
+    letter-spacing: -0.02em;
   }
 
-  /* 2026 Refined Scrollbars */
+  /* Visible keyboard focus for anything that doesn't define its own ring. */
+  :focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+  }
+  /* Programmatically focused containers (dialogs, main region) don't need a ring. */
+  [tabindex="-1"]:focus {
+    outline: none;
+  }
+
+  ::selection {
+    background: hsl(var(--foreground) / 0.14);
+  }
+
+  /* Quiet scrollbars that stay visible in both themes. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
+  }
   ::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
+    width: 8px;
+    height: 8px;
   }
   ::-webkit-scrollbar-track {
     background: transparent;
@@ -158,37 +219,47 @@
   ::-webkit-scrollbar-thumb {
     background: hsl(var(--border));
     border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
   }
   ::-webkit-scrollbar-thumb:hover {
     background: hsl(var(--muted-foreground) / 0.5);
+    background-clip: content-box;
+  }
+
+  /* Numbers in tables line up by default. */
+  table td,
+  table th {
+    font-variant-numeric: tabular-nums;
+  }
+
+  kbd {
+    font-family: inherit;
   }
 }
 
-/* 2026 Glassmorphism & Elevation Utilities */
-.glass-card {
-  background: hsl(var(--card) / 0.85);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid hsl(var(--border) / 0.7);
+@layer utilities {
+  /* Faint grid used behind onboarding / empty hero areas. */
+  .bg-subtle-grid {
+    background-image: linear-gradient(to right, hsl(var(--border) / 0.35) 1px, transparent 1px),
+      linear-gradient(to bottom, hsl(var(--border) / 0.35) 1px, transparent 1px);
+    background-size: 32px 32px;
+  }
+
+  /* Hide a scrollbar while keeping the region scrollable (tab strips, chip rows). */
+  .scrollbar-none {
+    scrollbar-width: none;
+  }
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
 }
 
-.glow-card {
-  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-}
-.glow-card:hover {
-  border-color: hsl(var(--primary) / 0.4);
-  box-shadow: 0 8px 30px -4px hsl(var(--primary) / 0.08);
-  transform: translateY(-1px);
-}
-
-.bg-subtle-grid {
-  background-image: linear-gradient(to right, hsl(var(--border) / 0.35) 1px, transparent 1px),
-                    linear-gradient(to bottom, hsl(var(--border) / 0.35) 1px, transparent 1px);
-  background-size: 32px 32px;
-}
-
+/* Respect users who ask the OS for less motion. */
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
+  *,
+  *::before,
+  *::after {
     scroll-behavior: auto !important;
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;

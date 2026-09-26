@@ -1,196 +1,214 @@
-import { useState } from "react";
+import { useEffect, useId, useState } from "react";
+import { Star } from "lucide-react";
+import { toast } from "sonner";
 import {
   Dialog,
   DialogContent,
-  DialogHeader,
-  DialogTitle,
   DialogDescription,
   DialogFooter,
+  DialogHeader,
+  DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
-import { useToast } from "@/hooks/use-toast";
-import { submitDemoFeedback } from "@/lib/demoData";
-import { Sparkles, Star, MessageSquare, Send } from "lucide-react";
-
+import { Textarea } from "@/components/ui/textarea";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
+import { sanitizeErrorMessage } from "@/lib/sanitize";
+import { cn } from "@/lib/utils";
+import { isMacPlatform } from "@/hooks/useHotkeys";
 
 interface BetaFeedbackDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
+const CATEGORIES = ["Bug report", "Feature request", "Usability", "General"] as const;
+const RATING_LABELS = ["", "Poor", "Fair", "Good", "Very good", "Excellent"];
+const MIN_COMMENT = 10;
+const MAX_COMMENT = 4000;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/** "Send feedback" dialog. Writes a row to `feedback` (visible to workspace admins). */
 export function BetaFeedbackDialog({ open, onOpenChange }: BetaFeedbackDialogProps) {
-  const { toast } = useToast();
   const { user } = useAuth();
-  const [rating, setRating] = useState(5);
-  const [category, setCategory] = useState("Usability");
+  const ids = useId();
+  const [rating, setRating] = useState<number | null>(null);
+  const [category, setCategory] = useState<(typeof CATEGORIES)[number]>("General");
   const [comment, setComment] = useState("");
-  const [email, setEmail] = useState(user?.email || "");
+  const [email, setEmail] = useState(user?.email ?? "");
+  const [submitted, setSubmitted] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const categories = ["Usability", "Feature Request", "Bug Report", "AI Copilot", "General"];
+  useEffect(() => {
+    if (open) {
+      setSubmitted(false);
+      setEmail((prev) => prev || user?.email || "");
+    }
+  }, [open, user?.email]);
+
+  const commentError =
+    comment.trim().length < MIN_COMMENT
+      ? `Please write at least ${MIN_COMMENT} characters.`
+      : comment.length > MAX_COMMENT
+        ? `Please keep it under ${MAX_COMMENT} characters.`
+        : null;
+  const emailError = email.trim() && !EMAIL_RE.test(email.trim()) ? "Enter a valid email address, or leave it empty." : null;
+  const ratingError = rating === null ? "Choose a rating." : null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!comment.trim()) {
-      toast({ title: "Please enter your comments", variant: "destructive" });
-      return;
-    }
+    setSubmitted(true);
+    if (commentError || emailError || ratingError || isSubmitting) return;
 
     setIsSubmitting(true);
-    const feedbackEmail = email.trim() || user?.email || undefined;
-
-    // 1. Local fallback
-    submitDemoFeedback({
-      rating,
+    const { error } = await supabase.from("feedback").insert({
+      rating: rating!,
       category,
       comment: comment.trim(),
-      email: feedbackEmail,
+      email: email.trim() || null,
+      user_id: user?.id ?? null,
+      status: "new",
     });
-
-    // 2. Supabase Live Sync
-    try {
-      await supabase.from("feedback").insert({
-        rating,
-        category,
-        comment: comment.trim(),
-        email: feedbackEmail || null,
-        user_id: user?.id || null,
-        status: "new",
-      });
-    } catch (err) {
-      console.warn("[BetaFeedback] Supabase insert warning:", err);
-    }
-
     setIsSubmitting(false);
-    toast({
-      title: "Thank you for testing the Beta! 🎉",
-      description: "Your feedback directly shapes our 2026 release roadmap.",
-    });
+
+    if (error) {
+      toast.error("Couldn't send your feedback", { description: sanitizeErrorMessage(error.message) });
+      return;
+    }
+    toast.success("Thanks — your feedback was sent");
     setComment("");
+    setRating(null);
+    setCategory("General");
+    setSubmitted(false);
     onOpenChange(false);
   };
 
+  const showErrors = submitted;
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+    <Dialog open={open} onOpenChange={(next) => !isSubmitting && onOpenChange(next)}>
+      <DialogContent className="max-w-md">
         <DialogHeader>
-          <div className="flex items-center gap-2 mb-1">
-            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10 text-primary">
-              <Sparkles className="h-4 w-4" />
-            </div>
-            <DialogTitle className="text-base font-semibold">
-              Beta Product Feedback
-            </DialogTitle>
-            <Badge variant="outline" className="text-[10px] border-primary/30 text-primary">
-              v0.9.8 Beta
-            </Badge>
-          </div>
-          <DialogDescription className="text-xs text-muted-foreground">
-            Help us refine the 2026 CRM experience before general release.
-          </DialogDescription>
+          <DialogTitle>Send feedback</DialogTitle>
+          <DialogDescription>Report a problem or tell us what would make Goom work better for you.</DialogDescription>
         </DialogHeader>
 
-        <form onSubmit={handleSubmit} className="space-y-4 pt-1">
-          {/* Rating */}
-          <div className="space-y-1.5">
-            <Label className="text-xs font-medium">How is your Beta experience?</Label>
-            <div className="flex items-center gap-2 pt-1">
-              {[1, 2, 3, 4, 5].map((val) => (
-                <button
-                  key={val}
-                  type="button"
-                  onClick={() => setRating(val)}
-                  className={`flex h-8 w-8 items-center justify-center rounded-lg border transition-all ${
-                    val <= rating
-                      ? "border-amber-400 bg-amber-400/10 text-amber-500"
-                      : "border-border text-muted-foreground hover:border-border/80"
-                  }`}
-                >
-                  <Star className={`h-4 w-4 ${val <= rating ? "fill-current" : ""}`} />
-                </button>
-              ))}
-              <span className="text-xs font-medium text-muted-foreground ml-2">
-                {rating === 5 ? "Loved it!" : rating >= 3 ? "Good" : "Needs polish"}
+        <form onSubmit={handleSubmit} className="space-y-5" noValidate>
+          <fieldset className="space-y-2">
+            <legend className="text-sm font-medium">
+              How would you rate Goom so far? <span className="text-destructive" aria-hidden="true">*</span>
+            </legend>
+            <div className="flex items-center gap-1.5" role="radiogroup" aria-label="Rating" aria-describedby={`${ids}-rating-err`}>
+              {[1, 2, 3, 4, 5].map((val) => {
+                const active = rating !== null && val <= rating;
+                return (
+                  <button
+                    key={val}
+                    type="button"
+                    role="radio"
+                    aria-checked={rating === val}
+                    aria-label={`${val} of 5 — ${RATING_LABELS[val]}`}
+                    onClick={() => setRating(val)}
+                    className={cn(
+                      "flex h-9 w-9 items-center justify-center rounded-lg border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                      active ? "border-warning/40 bg-warning/10 text-warning" : "border-input text-muted-foreground hover:bg-accent",
+                    )}
+                  >
+                    <Star className={cn("h-4 w-4", active && "fill-current")} aria-hidden="true" />
+                  </button>
+                );
+              })}
+              <span className="ml-2 text-xs text-muted-foreground" aria-live="polite">
+                {rating ? RATING_LABELS[rating] : ""}
               </span>
             </div>
-          </div>
+            {showErrors && ratingError && (
+              <p id={`${ids}-rating-err`} className="text-xs text-destructive">
+                {ratingError}
+              </p>
+            )}
+          </fieldset>
 
-          {/* Category */}
-          <div className="space-y-1.5">
-            <Label className="text-xs font-medium">Category</Label>
-            <div className="flex flex-wrap gap-1.5">
-              {categories.map((cat) => (
+          <fieldset className="space-y-2">
+            <legend className="text-sm font-medium">Category</legend>
+            <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label="Category">
+              {CATEGORIES.map((cat) => (
                 <button
                   key={cat}
                   type="button"
+                  role="radio"
+                  aria-checked={category === cat}
                   onClick={() => setCategory(cat)}
-                  className={`rounded-lg px-2.5 py-1 text-xs font-medium transition-all ${
+                  className={cn(
+                    "rounded-md border px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
                     category === cat
-                      ? "bg-foreground text-background"
-                      : "border border-border bg-background text-muted-foreground hover:text-foreground"
-                  }`}
+                      ? "border-primary bg-primary text-primary-foreground"
+                      : "border-input bg-card text-muted-foreground hover:text-foreground",
+                  )}
                 >
                   {cat}
                 </button>
               ))}
             </div>
-          </div>
+          </fieldset>
 
-          {/* Comment */}
-          <div className="space-y-1.5">
-            <Label htmlFor="comment" className="text-xs font-medium">
-              Your feedback & observations
+          <div className="space-y-2">
+            <Label htmlFor={`${ids}-comment`}>
+              Your feedback <span className="text-destructive" aria-hidden="true">*</span>
             </Label>
             <Textarea
-              id="comment"
+              id={`${ids}-comment`}
               value={comment}
               onChange={(e) => setComment(e.target.value)}
-              placeholder="What feels great? What can we improve about the dashboard or pipeline?"
-              rows={3}
-              className="text-xs resize-none"
-              required
+              placeholder="What happened, or what would you like to see?"
+              rows={4}
+              autoFocus
+              maxLength={MAX_COMMENT + 100}
+              aria-invalid={showErrors && !!commentError}
+              aria-describedby={`${ids}-comment-err`}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  (e.currentTarget.form as HTMLFormElement | null)?.requestSubmit();
+                }
+              }}
             />
+            {showErrors && commentError ? (
+              <p id={`${ids}-comment-err`} className="text-xs text-destructive">
+                {commentError}
+              </p>
+            ) : (
+              <p className="text-xs text-muted-foreground">Tip: press {isMacPlatform() ? "⌘" : "Ctrl"}+Enter to send.</p>
+            )}
           </div>
 
-          {/* Optional Email */}
-          <div className="space-y-1.5">
-            <Label htmlFor="fb-email" className="text-xs font-medium text-muted-foreground">
-              Contact email (optional, for follow-up)
-            </Label>
+          <div className="space-y-2">
+            <Label htmlFor={`${ids}-email`}>Email for follow-up (optional)</Label>
             <Input
-              id="fb-email"
+              id={`${ids}-email`}
               type="email"
+              autoComplete="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="you@company.com"
-              className="text-xs h-9"
+              aria-invalid={showErrors && !!emailError}
+              aria-describedby={`${ids}-email-err`}
             />
+            {showErrors && emailError && (
+              <p id={`${ids}-email-err`} className="text-xs text-destructive">
+                {emailError}
+              </p>
+            )}
           </div>
 
-          <DialogFooter className="pt-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => onOpenChange(false)}
-              className="text-xs"
-            >
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={isSubmitting}>
               Cancel
             </Button>
-            <Button
-              type="submit"
-              size="sm"
-              disabled={isSubmitting}
-              className="bg-primary text-primary-foreground hover:bg-primary/90 text-xs font-medium gap-1.5"
-            >
-              <Send className="h-3.5 w-3.5" />
-              <span>Submit Feedback</span>
+            <Button type="submit" loading={isSubmitting}>
+              {isSubmitting ? "Sending…" : "Send feedback"}
             </Button>
           </DialogFooter>
         </form>

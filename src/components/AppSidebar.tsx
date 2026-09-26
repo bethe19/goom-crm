@@ -1,27 +1,49 @@
-import { useAuth } from "@/contexts/AuthContext";
+import { Link, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { supabase } from "@/integrations/supabase/client";
+import { useTheme } from "next-themes";
+import type { LucideIcon } from "lucide-react";
 import {
   Activity,
   BarChart3,
   Building2,
   CalendarDays,
   CheckSquare,
-  Database,
+  ChevronsUpDown,
+  Compass,
   FileSpreadsheet,
   Kanban,
+  Keyboard,
   LayoutDashboard,
   LogOut,
-  MessageSquare,
   MessageSquarePlus,
+  Palette,
   Settings,
   Shield,
-  SlidersHorizontal,
+  ShieldCheck,
   TrendingUp,
   Users,
 } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/contexts/AuthContext";
+import { ROLE_LABELS } from "@/lib/permissions";
+import { useMyProfile } from "@/hooks/useMyProfile";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Badge } from "@/components/ui/badge";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuPortal,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuShortcut,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Sidebar,
   SidebarContent,
@@ -31,168 +53,273 @@ import {
   SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
+  SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
+  SidebarRail,
+  useSidebar,
 } from "@/components/ui/sidebar";
-import { NavLink, useLocation } from "react-router-dom";
-import { Brand } from "@/components/Brand";
+import { GMark } from "@/components/GMark";
+import { THEME_OPTIONS } from "@/components/ThemeToggle";
+import { cn } from "@/lib/utils";
 
-const adminNav = [
-  { title: "Platform Overview", icon: Shield, to: "/admin" },
-  { title: "User & Role Access", icon: Users, to: "/admin?tab=users" },
-  { title: "Beta Feedback", icon: MessageSquare, to: "/admin?tab=feedback" },
-  { title: "Database & Health", icon: Database, to: "/admin?tab=database" },
-  { title: "System Settings", icon: Settings, to: "/settings" },
+interface NavItem {
+  title: string;
+  icon: LucideIcon;
+  to: string;
+  badge?: "overdue-tasks";
+}
+
+interface NavGroup {
+  label: string;
+  items: NavItem[];
+}
+
+const NAV: NavGroup[] = [
+  {
+    label: "Workspace",
+    items: [
+      { title: "Dashboard", icon: LayoutDashboard, to: "/dashboard" },
+      { title: "Pipeline", icon: Kanban, to: "/pipeline" },
+      { title: "Contacts", icon: Users, to: "/contacts" },
+      { title: "Companies", icon: Building2, to: "/companies" },
+    ],
+  },
+  {
+    label: "Work",
+    items: [
+      { title: "Tasks", icon: CheckSquare, to: "/tasks", badge: "overdue-tasks" },
+      { title: "Activities", icon: Activity, to: "/activities" },
+      { title: "Calendar", icon: CalendarDays, to: "/calendar" },
+    ],
+  },
+  {
+    label: "Insights",
+    items: [
+      { title: "Forecast", icon: TrendingUp, to: "/forecast" },
+      { title: "Reports", icon: BarChart3, to: "/reports" },
+    ],
+  },
+  {
+    label: "Manage",
+    items: [
+      { title: "Import & export", icon: FileSpreadsheet, to: "/data" },
+      { title: "Settings", icon: Settings, to: "/settings" },
+    ],
+  },
 ];
 
-const repNav = [
-  { title: "Dashboard", icon: LayoutDashboard, to: "/dashboard" },
-  { title: "Pipeline", icon: Kanban, to: "/pipeline" },
-  { title: "Contacts", icon: Users, to: "/contacts" },
-  { title: "Companies", icon: Building2, to: "/companies" },
-  { title: "Activities", icon: Activity, to: "/activities" },
-  { title: "Tasks", icon: CheckSquare, to: "/tasks" },
-  { title: "Calendar", icon: CalendarDays, to: "/calendar" },
-  { title: "Forecast", icon: TrendingUp, to: "/forecast" },
-  { title: "Reports", icon: BarChart3, to: "/reports" },
-  { title: "Import/Export", icon: FileSpreadsheet, to: "/data" },
-  { title: "Settings", icon: Settings, to: "/settings" },
-];
+function initials(name: string) {
+  const parts = name.trim().split(/[\s@._-]+/).filter(Boolean);
+  return ((parts[0]?.[0] ?? "") + (parts[1]?.[0] ?? "")).toUpperCase() || "?";
+}
+
+/** Open tasks past their due date that are assigned to or created by me. */
+function useOverdueTaskCount(userId: string | undefined) {
+  return useQuery({
+    queryKey: ["tasks", "overdue-count", userId],
+    enabled: !!userId,
+    staleTime: 60_000,
+    queryFn: async () => {
+      const { count, error } = await supabase
+        .from("tasks")
+        .select("id", { count: "exact", head: true })
+        .eq("completed", false)
+        .lt("due_date", new Date().toISOString())
+        .or(`assigned_to.eq.${userId},user_id.eq.${userId}`);
+      if (error) return 0; // badge is a nicety; never break the nav over it
+      return count ?? 0;
+    },
+  });
+}
 
 interface AppSidebarProps {
   onOpenFeedback?: () => void;
+  onOpenShortcuts?: () => void;
+  onStartTour?: () => void;
 }
 
-export function AppSidebar({ onOpenFeedback }: AppSidebarProps) {
-  const { signOut, user, isDemoMode, isAdmin } = useAuth();
-  const location = useLocation();
-  const isCrmPreview = location.search.includes("view=crm");
+export function AppSidebar({ onOpenFeedback, onOpenShortcuts, onStartTour }: AppSidebarProps) {
+  const { signOut, user, organization, userRole, can, isPlatformAdmin } = useAuth();
+  const { data: profile } = useMyProfile();
+  const { data: overdue = 0 } = useOverdueTaskCount(user?.id);
+  const { theme = "system", setTheme } = useTheme();
+  const { isMobile, setOpenMobile } = useSidebar();
+  const { pathname } = useLocation();
 
-  const { data: profile } = useQuery({
-    queryKey: ["profile-sidebar", user?.id, isDemoMode],
-    queryFn: async () => {
-      if (isDemoMode) {
-        return {
-          avatar_url: "",
-          full_name: "Alex Vance",
-        };
-      }
-      const { data } = await supabase.from("profiles").select("avatar_url, full_name").eq("user_id", user!.id).single();
-      return data;
-    },
-    enabled: !!user,
-  });
+  const closeMobile = () => {
+    if (isMobile) setOpenMobile(false);
+  };
 
-  // Admins see platform data navigation only; reps see CRM pipeline navigation
-  const activeNav = (isAdmin && !isCrmPreview) ? adminNav : repNav;
+  const displayName = profile?.full_name?.trim() || user?.email?.split("@")[0] || "Account";
+  const roleLabel = userRole ? ROLE_LABELS[userRole] : "Member";
+  const workspaceName = organization?.name || "Workspace";
+
+  const groups: NavGroup[] = NAV.map((g) =>
+    g.label === "Manage" && can("workspace.admin")
+      ? { ...g, items: [...g.items, { title: "Admin", icon: Shield, to: "/admin" }] }
+      : g,
+  );
+  // SaaS operator console: its own group so it's never mistaken for a workspace page.
+  if (isPlatformAdmin) groups.push({ label: "Operator", items: [{ title: "Platform", icon: ShieldCheck, to: "/platform" }] });
 
   return (
-    <Sidebar className="border-r border-sidebar-border bg-sidebar">
-      <SidebarHeader className="p-4 pb-2">
-        <div className="flex items-center justify-between">
-          <NavLink to={isAdmin ? "/admin" : "/dashboard"} className="flex items-center gap-2">
-            <Brand size="md" />
-          </NavLink>
-          <Badge
-            variant="outline"
-            className={`text-[9px] font-mono px-1.5 py-0 ${
-              isAdmin ? "bg-foreground text-background font-semibold" : "border-border bg-secondary text-foreground"
-            }`}
-          >
-            {isAdmin ? "Admin Console" : "Beta 0.9.8"}
-          </Badge>
-        </div>
-      </SidebarHeader>
-
-      <SidebarContent>
-        <SidebarGroup>
-          <SidebarGroupLabel className="px-2 text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
-            {isAdmin && !isCrmPreview ? "Platform Superadmin" : "Sales Workspace"}
-          </SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarMenu className="gap-1 px-2">
-              {activeNav.map((item) => (
-                <SidebarMenuItem key={item.title}>
-                  <SidebarMenuButton asChild>
-                    <NavLink
-                      to={item.to}
-                      className={({ isActive }) =>
-                        `flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-xs font-medium transition-colors ${
-                          isActive && (location.search === (item.to.split("?")[1] ? `?${item.to.split("?")[1]}` : "") || (!item.to.includes("?") && !location.search))
-                            ? "bg-sidebar-accent text-sidebar-accent-foreground font-semibold shadow-2xs"
-                            : "text-sidebar-foreground/75 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground"
-                        }`
-                      }
-                    >
-                      <item.icon className="h-4 w-4 shrink-0" />
-                      <span>{item.title}</span>
-                    </NavLink>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
-      </SidebarContent>
-
-      <SidebarFooter className="p-3 space-y-2 border-t border-sidebar-border">
-        <SidebarMenu className="gap-1">
-          {isAdmin && (
-            <SidebarMenuItem>
-              <SidebarMenuButton asChild>
-                <NavLink
-                  to={isCrmPreview ? "/admin" : "/dashboard?view=crm"}
-                  className="text-xs text-sidebar-foreground/75 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground rounded-lg"
-                >
-                  <SlidersHorizontal className="h-4 w-4" />
-                  <span>{isCrmPreview ? "Return to Platform Admin" : "Preview Rep Sales CRM"}</span>
-                </NavLink>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          )}
-
-          {onOpenFeedback && (
-            <SidebarMenuItem>
-              <SidebarMenuButton
-                onClick={onOpenFeedback}
-                className="text-xs text-sidebar-foreground/75 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground rounded-lg"
-              >
-                <MessageSquarePlus className="h-4 w-4" />
-                <span>Beta Feedback</span>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          )}
-
+    <Sidebar collapsible="icon" className="border-r border-sidebar-border">
+      <SidebarHeader className="p-2">
+        <SidebarMenu>
           <SidebarMenuItem>
-            <SidebarMenuButton
-              onClick={signOut}
-              className="text-xs text-sidebar-foreground/75 hover:bg-sidebar-accent/50 hover:text-destructive rounded-lg"
-            >
-              <LogOut className="h-4 w-4" />
-              <span>{isDemoMode ? "Exit Sandbox" : "Sign out"}</span>
+            <SidebarMenuButton asChild size="lg" tooltip={workspaceName} className="gap-2.5">
+              <Link to="/dashboard" onClick={closeMobile}>
+                <span className="flex aspect-square size-8 shrink-0 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
+                  <GMark className="h-5 w-5" />
+                </span>
+                <span className="grid min-w-0 flex-1 text-left leading-tight">
+                  <span className="truncate text-sm font-semibold">{workspaceName}</span>
+                  <span className="truncate text-xs text-muted-foreground">Goom CRM</span>
+                </span>
+              </Link>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
+      </SidebarHeader>
 
-        {user && (
-          <div className="flex items-center gap-2.5 rounded-lg bg-sidebar-accent/40 p-2 border border-sidebar-border">
-            <Avatar className="h-7 w-7 border border-sidebar-border shrink-0">
-              <AvatarImage src={profile?.avatar_url || ""} className="object-cover" />
-              <AvatarFallback className="text-[10px] font-semibold bg-foreground text-background">
-                {(profile?.full_name || user.email || "AV").slice(0, 2).toUpperCase()}
-              </AvatarFallback>
-            </Avatar>
-            <div className="min-w-0 flex-1">
-              <p className="truncate text-xs font-semibold text-sidebar-foreground">
-                {profile?.full_name || (isDemoMode ? "Alex Vance" : user.email)}
-              </p>
-              <p className="truncate text-[10px] text-muted-foreground">
-                {isDemoMode ? "Beta Director" : "Team Member"}
-              </p>
-            </div>
-          </div>
-        )}
+      <SidebarContent data-tour="sidebar-nav" className="gap-0">
+        {groups.map((group) => (
+          <SidebarGroup key={group.label} className="py-1.5">
+            <SidebarGroupLabel className="h-7 text-xs font-medium text-sidebar-foreground/60">{group.label}</SidebarGroupLabel>
+            <SidebarGroupContent>
+              <SidebarMenu className="gap-0.5">
+                {group.items.map((item) => {
+                  const active = pathname === item.to || pathname.startsWith(`${item.to}/`);
+                  const showBadge = item.badge === "overdue-tasks" && overdue > 0;
+                  return (
+                    <SidebarMenuItem key={item.to}>
+                      <SidebarMenuButton
+                        asChild
+                        isActive={active}
+                        tooltip={showBadge ? `${item.title} · ${overdue} overdue` : item.title}
+                        className={cn(
+                          "h-8 font-normal text-sidebar-foreground/80 transition-colors duration-150",
+                          "data-[active=true]:bg-sidebar-accent data-[active=true]:font-medium data-[active=true]:text-sidebar-accent-foreground",
+                          "[&>svg]:text-sidebar-foreground/60 data-[active=true]:[&>svg]:text-sidebar-accent-foreground",
+                        )}
+                      >
+                        <Link to={item.to} onClick={closeMobile} aria-current={active ? "page" : undefined}>
+                          <item.icon aria-hidden="true" />
+                          <span>{item.title}</span>
+                        </Link>
+                      </SidebarMenuButton>
+                      {showBadge && (
+                        <SidebarMenuBadge
+                          className="rounded-full bg-destructive/10 px-1.5 text-destructive peer-hover/menu-button:text-destructive peer-data-[active=true]/menu-button:text-destructive"
+                          aria-label={`${overdue} overdue tasks`}
+                        >
+                          {overdue > 99 ? "99+" : overdue}
+                        </SidebarMenuBadge>
+                      )}
+                    </SidebarMenuItem>
+                  );
+                })}
+              </SidebarMenu>
+            </SidebarGroupContent>
+          </SidebarGroup>
+        ))}
+      </SidebarContent>
+
+      <SidebarFooter className="border-t border-sidebar-border p-2">
+        <SidebarMenu>
+          <SidebarMenuItem>
+            {/* Non-modal so dialogs opened from menu items (shortcuts, feedback) get focus cleanly. */}
+            <DropdownMenu modal={false}>
+              <DropdownMenuTrigger asChild>
+                <SidebarMenuButton
+                  size="lg"
+                  data-tour="user-menu"
+                  tooltip={`${displayName} · ${roleLabel}`}
+                  className="gap-2.5 data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
+                  aria-label={`Account menu for ${displayName}`}
+                >
+                  <Avatar className="h-8 w-8 shrink-0 rounded-lg">
+                    <AvatarImage src={profile?.avatar_url || undefined} alt="" className="object-cover" />
+                    <AvatarFallback className="rounded-lg bg-sidebar-primary text-xs font-semibold text-sidebar-primary-foreground">
+                      {initials(displayName)}
+                    </AvatarFallback>
+                  </Avatar>
+                  <span className="grid min-w-0 flex-1 text-left leading-tight">
+                    <span className="truncate text-sm font-medium">{displayName}</span>
+                    <span className="truncate text-xs text-muted-foreground">{roleLabel}</span>
+                  </span>
+                  <ChevronsUpDown className="ml-auto !size-4 text-muted-foreground" aria-hidden="true" />
+                </SidebarMenuButton>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent
+                side={isMobile ? "top" : "right"}
+                align="end"
+                sideOffset={8}
+                className="w-60"
+              >
+                <DropdownMenuLabel className="font-normal">
+                  <span className="block truncate text-sm font-medium text-foreground">{displayName}</span>
+                  <span className="block truncate text-xs text-muted-foreground">{user?.email}</span>
+                  <span className="mt-1 block truncate text-xs text-muted-foreground">
+                    {roleLabel} · {workspaceName}
+                  </span>
+                </DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuGroup>
+                  <DropdownMenuItem asChild>
+                    <Link to="/settings" onClick={closeMobile}>
+                      <Settings /> Settings
+                    </Link>
+                  </DropdownMenuItem>
+                  <DropdownMenuSub>
+                    <DropdownMenuSubTrigger>
+                      <Palette className="text-muted-foreground" /> Theme
+                    </DropdownMenuSubTrigger>
+                    <DropdownMenuPortal>
+                      <DropdownMenuSubContent className="w-36">
+                        <DropdownMenuRadioGroup value={theme} onValueChange={setTheme}>
+                          {THEME_OPTIONS.map((o) => (
+                            <DropdownMenuRadioItem key={o.value} value={o.value}>
+                              {o.label}
+                            </DropdownMenuRadioItem>
+                          ))}
+                        </DropdownMenuRadioGroup>
+                      </DropdownMenuSubContent>
+                    </DropdownMenuPortal>
+                  </DropdownMenuSub>
+                  {onOpenShortcuts && (
+                    <DropdownMenuItem onSelect={onOpenShortcuts}>
+                      <Keyboard /> Keyboard shortcuts
+                      <DropdownMenuShortcut>?</DropdownMenuShortcut>
+                    </DropdownMenuItem>
+                  )}
+                  {onStartTour && (
+                    <DropdownMenuItem
+                      onSelect={() => {
+                        closeMobile();
+                        onStartTour();
+                      }}
+                    >
+                      <Compass /> Take the tour
+                    </DropdownMenuItem>
+                  )}
+                  {onOpenFeedback && (
+                    <DropdownMenuItem onSelect={onOpenFeedback}>
+                      <MessageSquarePlus /> Send feedback
+                    </DropdownMenuItem>
+                  )}
+                </DropdownMenuGroup>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onSelect={() => void signOut()}>
+                  <LogOut /> Sign out
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </SidebarMenuItem>
+        </SidebarMenu>
       </SidebarFooter>
+      <SidebarRail />
     </Sidebar>
   );
 }

@@ -1,115 +1,217 @@
-import { useState, useEffect } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { z } from "zod";
+import { toast } from "sonner";
+import { Camera, Loader2, Trash2 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/integrations/supabase/client";
+import { useMyProfile, useUpdateMyProfile } from "@/hooks/useMyProfile";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { useToast } from "@/hooks/use-toast";
-import { Loader2, Camera } from "lucide-react";
-import { sanitizeErrorMessage } from "@/lib/sanitize";
-import { useQueryClient } from "@tanstack/react-query";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { ErrorState } from "@/components/common/States";
+import { FieldError, SettingsSection } from "./shared";
+import { browserTimezone, errorMessage, fullNameSchema, initials, listTimezones } from "./validation";
+
+const schema = z.object({
+  full_name: fullNameSchema,
+  job_title: z.string().trim().max(100, "Keep it under 100 characters"),
+  timezone: z.string().min(1),
+});
+type Values = z.infer<typeof schema>;
+
+const AVATAR_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
 
 export function ProfileSettings() {
   const { user } = useAuth();
-  const { toast } = useToast();
-  const queryClient = useQueryClient();
-  const [fullName, setFullName] = useState("");
-  const [company, setCompany] = useState("");
-  const [avatarUrl, setAvatarUrl] = useState("");
-  const [saving, setSaving] = useState(false);
+  const profileQuery = useMyProfile();
+  const update = useUpdateMyProfile();
+  const profile = profileQuery.data;
+  const timezones = useMemo(() => listTimezones(), []);
+  const fileInput = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
 
+  const form = useForm<Values>({
+    resolver: zodResolver(schema),
+    defaultValues: { full_name: "", job_title: "", timezone: browserTimezone() },
+  });
+  const { register, handleSubmit, formState, reset, watch, setValue } = form;
+  const timezone = watch("timezone");
+  const name = watch("full_name");
+
   useEffect(() => {
-    if (!user) return;
-    supabase.from("profiles").select("*").eq("user_id", user.id).single().then(({ data }) => {
-      if (data) {
-        setFullName(data.full_name || "");
-        setCompany(data.company || "");
-        setAvatarUrl(data.avatar_url || "");
-      }
-    });
-  }, [user]);
+    if (profile) {
+      reset({
+        full_name: profile.full_name ?? "",
+        job_title: profile.job_title ?? "",
+        timezone: profile.timezone ?? browserTimezone(),
+      });
+    }
+  }, [profile, reset]);
 
-  const handleAvatarUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const onSubmit = handleSubmit(async (values) => {
+    try {
+      await update.mutateAsync({
+        full_name: values.full_name.trim(),
+        job_title: values.job_title.trim() || null,
+        timezone: values.timezone,
+      });
+      reset(values);
+      toast.success("Profile saved");
+    } catch (err) {
+      toast.error(errorMessage(err));
+    }
+  });
+
+  const onAvatarSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = "";
     if (!file || !user) return;
-
-    const allowedTypes = ["image/jpeg", "image/png", "image/gif", "image/webp"];
-    if (!allowedTypes.includes(file.type)) {
-      toast({ title: "Invalid file type", description: "Please upload a JPEG, PNG, GIF, or WebP image.", variant: "destructive" });
+    if (!AVATAR_TYPES.includes(file.type)) {
+      toast.error("Use a JPEG, PNG, GIF or WebP image.");
       return;
     }
-    if (file.size > 2 * 1024 * 1024) {
-      toast({ title: "File too large", description: "Avatar must be under 2 MB.", variant: "destructive" });
+    if (file.size > AVATAR_MAX_BYTES) {
+      toast.error("Images must be under 2 MB.");
       return;
     }
-
     setUploading(true);
-    const path = `${user.id}/avatar.${file.name.split('.').pop()}`;
-    const { error: uploadError } = await supabase.storage.from("avatars").upload(path, file, { upsert: true });
-    if (uploadError) {
-      toast({ title: "Upload failed", description: sanitizeErrorMessage(uploadError.message), variant: "destructive" });
+    try {
+      const ext = file.type.split("/")[1] === "jpeg" ? "jpg" : file.type.split("/")[1];
+      const path = `${user.id}/avatar.${ext}`;
+      const { error: uploadError } = await supabase.storage
+        .from("avatars")
+        .upload(path, file, { upsert: true, contentType: file.type, cacheControl: "3600" });
+      if (uploadError) throw uploadError;
+      const { data } = supabase.storage.from("avatars").getPublicUrl(path);
+      await update.mutateAsync({ avatar_url: `${data.publicUrl}?v=${Date.now()}` });
+      toast.success("Photo updated");
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
       setUploading(false);
-      return;
     }
-    const { data: { publicUrl } } = supabase.storage.from("avatars").getPublicUrl(path);
-    const url = `${publicUrl}?t=${Date.now()}`;
-    await supabase.from("profiles").update({ avatar_url: url }).eq("user_id", user.id);
-    setAvatarUrl(url);
-    queryClient.invalidateQueries({ queryKey: ["profile-sidebar"] });
-    setUploading(false);
-    toast({ title: "Avatar updated" });
   };
 
-  const handleSave = async () => {
-    if (!user) return;
-    setSaving(true);
-    const { error } = await supabase.from("profiles").update({ full_name: fullName, company }).eq("user_id", user.id);
-    setSaving(false);
-    if (error) toast({ title: "Error", description: sanitizeErrorMessage(error.message), variant: "destructive" });
-    else {
-      toast({ title: "Profile updated" });
-      queryClient.invalidateQueries({ queryKey: ["profile-sidebar"] });
+  const removeAvatar = async () => {
+    try {
+      await update.mutateAsync({ avatar_url: null });
+      toast.success("Photo removed");
+    } catch (err) {
+      toast.error(errorMessage(err));
     }
   };
+
+  if (profileQuery.isLoading) {
+    return (
+      <div className="space-y-4" aria-busy="true" aria-label="Loading profile">
+        <Skeleton className="h-28 w-full rounded-xl" />
+        <Skeleton className="h-72 w-full rounded-xl" />
+      </div>
+    );
+  }
+  if (profileQuery.isError) {
+    return <ErrorState error={profileQuery.error} title="Couldn't load your profile" onRetry={() => profileQuery.refetch()} />;
+  }
 
   return (
-    <div className="space-y-6 max-w-md">
-      <div className="flex items-center gap-4">
-        <div className="relative group">
+    <div className="space-y-6">
+      <SettingsSection title="Photo" description="Shown next to your deals, tasks and activity.">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
           <Avatar className="h-16 w-16">
-            <AvatarImage src={avatarUrl} />
-            <AvatarFallback className="text-lg">{(fullName || user?.email || "U").slice(0, 2).toUpperCase()}</AvatarFallback>
+            <AvatarImage src={profile?.avatar_url ?? undefined} alt="" />
+            <AvatarFallback className="text-lg">{initials(name || profile?.full_name, user?.email)}</AvatarFallback>
           </Avatar>
-          <label className="absolute inset-0 flex items-center justify-center rounded-full bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer">
-            {uploading ? <Loader2 className="h-5 w-5 animate-spin text-white" /> : <Camera className="h-5 w-5 text-white" />}
-            <input type="file" accept="image/*" className="hidden" onChange={handleAvatarUpload} disabled={uploading} />
-          </label>
+          <div className="flex flex-wrap gap-2">
+            <input
+              ref={fileInput}
+              type="file"
+              accept={AVATAR_TYPES.join(",")}
+              className="sr-only"
+              tabIndex={-1}
+              aria-hidden
+              onChange={onAvatarSelected}
+            />
+            <Button type="button" variant="outline" size="sm" className="gap-1.5" disabled={uploading} onClick={() => fileInput.current?.click()}>
+              {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Camera className="h-4 w-4" />}
+              {uploading ? "Uploading…" : "Upload photo"}
+            </Button>
+            {profile?.avatar_url && (
+              <Button type="button" variant="ghost" size="sm" className="gap-1.5" disabled={uploading || update.isPending} onClick={removeAvatar}>
+                <Trash2 className="h-4 w-4" /> Remove
+              </Button>
+            )}
+          </div>
+          <p className="text-xs text-muted-foreground sm:ml-auto">JPEG, PNG, GIF or WebP, up to 2 MB.</p>
         </div>
-        <div>
-          <p className="font-medium">{fullName || "Your Name"}</p>
-          <p className="text-sm text-muted-foreground">{user?.email}</p>
-        </div>
-      </div>
+      </SettingsSection>
 
-      <div className="space-y-4">
-        <div className="space-y-2">
-          <Label>Full Name</Label>
-          <Input value={fullName} onChange={(e) => setFullName(e.target.value)} maxLength={100} />
-        </div>
-        <div className="space-y-2">
-          <Label>Company</Label>
-          <Input value={company} onChange={(e) => setCompany(e.target.value)} maxLength={100} />
-        </div>
-        <div className="space-y-2">
-          <Label>Email</Label>
-          <Input value={user?.email || ""} disabled />
-        </div>
-        <Button className="w-full sm:w-auto" onClick={handleSave} disabled={saving}>
-          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : "Save Changes"}
-        </Button>
-      </div>
+      <form onSubmit={onSubmit} noValidate>
+        <SettingsSection
+          title="Personal details"
+          description="How you appear to teammates."
+          footer={
+            <Button type="submit" disabled={formState.isSubmitting || !formState.isDirty}>
+              {formState.isSubmitting ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" /> Saving…
+                </>
+              ) : (
+                "Save changes"
+              )}
+            </Button>
+          }
+        >
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="profile-name">
+                Full name <span className="text-destructive" aria-hidden>*</span>
+              </Label>
+              <Input id="profile-name" autoComplete="name" aria-invalid={!!formState.errors.full_name} {...register("full_name")} />
+              <FieldError message={formState.errors.full_name?.message} />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="profile-title">Job title</Label>
+              <Input id="profile-title" placeholder="e.g. Account Executive" autoComplete="organization-title" {...register("job_title")} />
+              <FieldError message={formState.errors.job_title?.message} />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="profile-email">Email</Label>
+              <Input id="profile-email" value={user?.email ?? ""} readOnly disabled />
+              <p className="text-xs text-muted-foreground">Change it under Account.</p>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="profile-timezone">Time zone</Label>
+              <Select value={timezone} onValueChange={(v) => setValue("timezone", v, { shouldDirty: true })}>
+                <SelectTrigger id="profile-timezone">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="max-h-72">
+                  {(timezones.includes(timezone) ? timezones : [timezone, ...timezones]).map((tz) => (
+                    <SelectItem key={tz} value={tz}>
+                      {tz.replace(/_/g, " ")}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {timezone !== browserTimezone() && (
+                <button
+                  type="button"
+                  className="rounded-sm text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+                  onClick={() => setValue("timezone", browserTimezone(), { shouldDirty: true })}
+                >
+                  Use this device's time zone ({browserTimezone().replace(/_/g, " ")})
+                </button>
+              )}
+            </div>
+          </div>
+        </SettingsSection>
+      </form>
     </div>
   );
 }

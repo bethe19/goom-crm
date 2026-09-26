@@ -1,281 +1,537 @@
-import { Deal, useUpdateDeal, useDeleteDeal } from "@/hooks/useDeals";
-import { useActivities, useCreateActivity } from "@/hooks/useActivities";
-import { useContacts } from "@/hooks/useContacts";
-import { useCompanies } from "@/hooks/useCompanies";
-import { useTasks } from "@/hooks/useTasks";
-import { useDealAuditLog } from "@/hooks/useDealAuditLog";
+import { useEffect, useMemo, useState } from "react";
+import { format } from "date-fns";
+import { Activity as ActivityIcon, CheckSquare, History, Loader2, Lock, MoreHorizontal, NotebookPen, RotateCcw, Trash2, Trophy, XCircle } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
-import { PipelineStage } from "@/hooks/usePipelineStages";
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { useDeal, useDeleteDeal, useMoveDeal, useUpdateDeal, type Deal } from "@/hooks/useDeals";
+import { stageOutcome, usePipelineStages, type PipelineStage } from "@/hooks/usePipelineStages";
+import { useActivities, type Activity } from "@/hooks/useActivities";
+import { useTasks } from "@/hooks/useTasks";
+import { useDealAuditLog, type AuditEntry } from "@/hooks/useDealAuditLog";
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { RichTextEditor } from "@/components/ui/rich-text-editor";
-import { Badge } from "@/components/ui/badge";
-import { Separator } from "@/components/ui/separator";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
-import { TaskItem } from "@/components/tasks/TaskItem";
-import { CreateTaskDialog } from "@/components/tasks/CreateTaskDialog";
-import { formatCurrency, formatDate, formatRelativeDate } from "@/lib/formatters";
+import { MarkdownView, RichTextEditor } from "@/components/ui/rich-text-editor";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { Skeleton } from "@/components/ui/skeleton";
+import { EmptyState, ErrorState, ListSkeleton } from "@/components/common/States";
+import { useConfirm } from "@/components/common/ConfirmDialog";
 import { useToast } from "@/hooks/use-toast";
-import { useState, useEffect } from "react";
-import { Phone, Mail, Calendar, FileText, Trash2, Save, Pencil, X, Plus, History } from "lucide-react";
-import { formatDistanceToNow } from "date-fns";
+import { formatCurrency, formatDate, formatRelativeDate } from "@/lib/formatters";
+import { errorMessage } from "@/components/settings/validation";
+import { UpgradePrompt } from "@/components/settings/UpgradePrompt";
+import { canModifyRecord } from "@/lib/permissions";
+import { cn } from "@/lib/utils";
+import { ActivityItem } from "@/components/activities/ActivityItem";
+import { ActivityComposer } from "@/components/activities/ActivityComposer";
+import { ActivityDetailDialog } from "@/components/activities/ActivityDetailDialog";
+import { TaskItem } from "@/components/tasks/TaskItem";
+import { TaskDetailDialog } from "@/components/tasks/TaskDetailDialog";
+import { QuickAddTask } from "@/components/tasks/QuickAddTask";
+import { FieldShell, InlineField } from "./InlineField";
+import { useSaveStatus } from "./useSaveStatus";
+import { LostReasonDialog } from "./LostReasonDialog";
+import { CompanyPicker, ContactPicker, MemberPicker } from "./pickers";
+import { isDealOverdue } from "./dealUtils";
+import { memberName, useWorkspaceMembers, type WorkspaceMember } from "./useWorkspaceMembers";
 
 interface DealDetailSheetProps {
   deal: Deal | null;
+  /** Open by id instead (fetched; works for deals in any pipeline). Ignored when `deal` is set. */
+  dealId?: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  stages: PipelineStage[];
+  /** Stages of the deal's pipeline; fetched when omitted. */
+  stages?: PipelineStage[];
 }
 
-export function DealDetailSheet({ deal, open, onOpenChange, stages }: DealDetailSheetProps) {
-  const { user } = useAuth();
-  const updateDeal = useUpdateDeal();
-  const deleteDeal = useDeleteDeal();
-  const createActivity = useCreateActivity();
-  const { data: activities } = useActivities({ limit: 10 });
-  const { data: tasks } = useTasks({ deal_id: deal?.id });
-  const { data: auditLog } = useDealAuditLog(deal?.id);
-  const { toast } = useToast();
-  const [editing, setEditing] = useState(false);
-  const [editTitle, setEditTitle] = useState("");
-  const [editValue, setEditValue] = useState("");
-  const [editProbability, setEditProbability] = useState("");
-  const [editCloseDate, setEditCloseDate] = useState("");
-  const [editNotes, setEditNotes] = useState("");
-  const [editStageId, setEditStageId] = useState("");
-  const [editContactId, setEditContactId] = useState("");
-  const [editCompanyId, setEditCompanyId] = useState("");
-  const [activityTitle, setActivityTitle] = useState("");
-  const [taskDialogOpen, setTaskDialogOpen] = useState(false);
-  const { data: allContacts } = useContacts();
-  const { data: allCompanies } = useCompanies();
-
-  useEffect(() => {
-    if (deal && editing) {
-      setEditTitle(deal.title);
-      setEditValue(String(deal.value || 0));
-      setEditProbability(String(deal.probability || 50));
-      setEditCloseDate(deal.close_date || "");
-      setEditNotes(deal.notes || "");
-      setEditStageId(deal.stage_id);
-      setEditContactId(deal.contact_id || "");
-      setEditCompanyId(deal.company_id || "");
-    }
-  }, [deal, editing]);
-
-  if (!deal) return null;
-
-  const dealActivities = activities?.filter((a) => a.deal_id === deal.id) || [];
-  const currentStage = stages.find((s) => s.id === deal.stage_id);
-
-  const handleQuickActivity = (type: "call" | "email" | "meeting" | "note") => {
-    if (!user || !activityTitle.trim()) {
-      toast({ title: "Enter a title", variant: "destructive" });
-      return;
-    }
-    createActivity.mutate(
-      { deal_id: deal.id, user_id: user.id, type, title: activityTitle },
-      { onSuccess: () => { toast({ title: "Activity logged" }); setActivityTitle(""); } }
-    );
-  };
-
-  const handleSave = () => {
-    updateDeal.mutate(
-      {
-        id: deal.id, title: editTitle, value: parseFloat(editValue) || 0,
-        probability: parseInt(editProbability) || 50, close_date: editCloseDate || null,
-        notes: editNotes || null, stage_id: editStageId,
-        contact_id: editContactId || null, company_id: editCompanyId || null,
-      },
-      { onSuccess: () => { toast({ title: "Deal updated" }); setEditing(false); } }
-    );
-  };
-
-  const handleDelete = () => {
-    deleteDeal.mutate(deal.id, { onSuccess: () => { toast({ title: "Deal deleted" }); onOpenChange(false); } });
-  };
-
-  const formatAuditEntry = (entry: any) => {
-    if (entry.field === "stage_id") {
-      return `Stage changed from ${entry.old_stage_name || "unknown"} to ${entry.new_stage_name || "unknown"}`;
-    }
-    if (entry.field === "value") {
-      return `Value changed from ${formatCurrency(Number(entry.old_value || 0))} to ${formatCurrency(Number(entry.new_value || 0))}`;
-    }
-    if (entry.field === "probability") {
-      return `Probability changed from ${entry.old_value}% to ${entry.new_value}%`;
-    }
-    return `${entry.field} changed`;
-  };
+export function DealDetailSheet({ deal: dealProp, dealId, open, onOpenChange, stages: stagesProp }: DealDetailSheetProps) {
+  const id = dealProp?.id ?? dealId ?? null;
+  const { data: live, isLoading, error, refetch } = useDeal(open ? id : null, { initialData: dealProp });
+  const deal = live === undefined ? dealProp : live;
 
   return (
-    <Sheet open={open} onOpenChange={(o) => { if (!o) setEditing(false); onOpenChange(o); }}>
-      <SheetContent className="w-full sm:max-w-lg overflow-y-auto">
-        <SheetHeader>
-          <div className="flex items-center justify-between">
-            <SheetTitle className="flex items-center gap-2">
-              <div className="h-3 w-3 rounded-full" style={{ backgroundColor: currentStage?.color }} />
-              {deal.title}
-            </SheetTitle>
-            <Button variant="ghost" size="icon" onClick={() => setEditing(!editing)}>
-              {editing ? <X className="h-4 w-4" /> : <Pencil className="h-4 w-4" />}
-            </Button>
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent className="flex w-full flex-col gap-0 overflow-hidden p-0 sm:max-w-xl">
+        {deal ? (
+          <DealDetailBody key={deal.id} deal={deal} stagesProp={stagesProp} onClose={() => onOpenChange(false)} />
+        ) : isLoading ? (
+          <div className="space-y-3 p-6">
+            <SheetTitle className="sr-only">Loading deal</SheetTitle>
+            <Skeleton className="h-6 w-2/3" />
+            <Skeleton className="h-4 w-1/3" />
+            <ListSkeleton rows={4} />
           </div>
-        </SheetHeader>
-
-        <div className="mt-6 space-y-6">
-          {editing ? (
-            <div className="space-y-4">
-              <div className="space-y-2"><Label>Title</Label><Input value={editTitle} onChange={(e) => setEditTitle(e.target.value)} /></div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div className="space-y-2"><Label>Value</Label><Input type="number" value={editValue} onChange={(e) => setEditValue(e.target.value)} /></div>
-                <div className="space-y-2"><Label>Probability (%)</Label><Input type="number" min="0" max="100" value={editProbability} onChange={(e) => setEditProbability(e.target.value)} /></div>
-              </div>
-              <div className="space-y-2">
-                <Label>Stage</Label>
-                <Select value={editStageId} onValueChange={setEditStageId}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>{stages.map((s) => <SelectItem key={s.id} value={s.id}><div className="flex items-center gap-2"><div className="h-2 w-2 rounded-full" style={{ backgroundColor: s.color }} />{s.name}</div></SelectItem>)}</SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-2">
-                <Label>Contact</Label>
-                <Select value={editContactId} onValueChange={setEditContactId}>
-                  <SelectTrigger><SelectValue placeholder="Select contact..." /></SelectTrigger>
-                  <SelectContent>{allContacts?.map((c) => <SelectItem key={c.id} value={c.id}>{c.first_name} {c.last_name}</SelectItem>)}</SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-2">
-                <Label>Company</Label>
-                <Select value={editCompanyId} onValueChange={setEditCompanyId}>
-                  <SelectTrigger><SelectValue placeholder="Select company..." /></SelectTrigger>
-                  <SelectContent>{allCompanies?.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}</SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-2"><Label>Close Date</Label><Input type="date" value={editCloseDate} onChange={(e) => setEditCloseDate(e.target.value)} /></div>
-              <div className="space-y-2"><Label>Notes</Label><RichTextEditor value={editNotes} onChange={setEditNotes} rows={3} /></div>
-              <div className="flex gap-2">
-                <Button onClick={handleSave} disabled={updateDeal.isPending}><Save className="h-4 w-4 mr-1" /> Save Changes</Button>
-                <Button variant="ghost" onClick={() => setEditing(false)}>Cancel</Button>
-              </div>
-            </div>
-          ) : (
-            <>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
-                <div><span className="text-muted-foreground">Value</span><p className="font-semibold text-lg">{formatCurrency(Number(deal.value))}</p></div>
-                <div><span className="text-muted-foreground">Probability</span><p className="font-semibold">{deal.probability}%</p></div>
-                <div><span className="text-muted-foreground">Stage</span><Badge style={{ backgroundColor: currentStage?.color, color: "white" }}>{currentStage?.name}</Badge></div>
-                <div><span className="text-muted-foreground">Close Date</span><p>{deal.close_date ? formatDate(deal.close_date) : "Not set"}</p></div>
-              </div>
-              {deal.companies && <div className="text-sm"><span className="text-muted-foreground">Company</span><p className="font-medium">{deal.companies.name}</p></div>}
-              {deal.contacts && <div className="text-sm"><span className="text-muted-foreground">Contact</span><p className="font-medium">{deal.contacts.first_name} {deal.contacts.last_name}</p></div>}
-              {deal.notes && <div className="text-sm"><span className="text-muted-foreground">Notes</span><p className="mt-1 whitespace-pre-wrap">{deal.notes}</p></div>}
-            </>
-          )}
-
-          <Separator />
-
-          {/* Tasks Section */}
-          <div>
-            <div className="flex items-center justify-between mb-3">
-              <h4 className="text-sm font-semibold">Tasks</h4>
-              <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setTaskDialogOpen(true)}>
-                <Plus className="h-3 w-3 mr-1" /> Add Task
-              </Button>
-            </div>
-            {!tasks?.length ? (
-              <p className="text-sm text-muted-foreground">No tasks linked.</p>
-            ) : (
-              <div className="space-y-2">{tasks.map((t) => <TaskItem key={t.id} task={t} />)}</div>
-            )}
+        ) : error ? (
+          <div className="p-6">
+            <SheetTitle className="sr-only">Couldn't load deal</SheetTitle>
+            <ErrorState error={error} onRetry={() => refetch()} compact />
           </div>
-
-          <Separator />
-
-          {/* Quick Activity Log */}
-          <div>
-            <h4 className="text-sm font-semibold mb-3">Log Activity</h4>
-            <div className="flex gap-2 mb-2">
-              <Input placeholder="Activity title..." value={activityTitle} onChange={(e) => setActivityTitle(e.target.value)} className="flex-1" />
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <Button size="sm" variant="outline" onClick={() => handleQuickActivity("call")}><Phone className="h-3 w-3 mr-1" /> Call</Button>
-              <Button size="sm" variant="outline" onClick={() => handleQuickActivity("email")}><Mail className="h-3 w-3 mr-1" /> Email</Button>
-              <Button size="sm" variant="outline" onClick={() => handleQuickActivity("meeting")}><Calendar className="h-3 w-3 mr-1" /> Meeting</Button>
-              <Button size="sm" variant="outline" onClick={() => handleQuickActivity("note")}><FileText className="h-3 w-3 mr-1" /> Note</Button>
-            </div>
+        ) : (
+          <div className="p-6">
+            <SheetTitle className="sr-only">Deal not found</SheetTitle>
+            <EmptyState compact icon={XCircle} title="This deal no longer exists" description="It may have been deleted by a teammate." />
           </div>
-
-          <Separator />
-
-          {/* Activity Timeline */}
-          <div>
-            <h4 className="text-sm font-semibold mb-3">Activity Timeline</h4>
-            {dealActivities.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No activities logged yet.</p>
-            ) : (
-              <div className="space-y-3">
-                {dealActivities.map((a) => (
-                  <div key={a.id} className="flex gap-3 text-sm">
-                    <div className="mt-1">
-                      {a.type === "call" && <Phone className="h-4 w-4 text-blue-500" />}
-                      {a.type === "email" && <Mail className="h-4 w-4 text-purple-500" />}
-                      {a.type === "meeting" && <Calendar className="h-4 w-4 text-orange-500" />}
-                      {a.type === "note" && <FileText className="h-4 w-4 text-green-500" />}
-                    </div>
-                    <div>
-                      <p className="font-medium">{a.title}</p>
-                      <p className="text-xs text-muted-foreground">{formatRelativeDate(a.created_at)}</p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          <Separator />
-
-          {/* Audit Trail */}
-          {auditLog && auditLog.length > 0 && (
-            <>
-              <div>
-                <h4 className="text-sm font-semibold mb-3 flex items-center gap-1.5">
-                  <History className="h-4 w-4" /> History
-                </h4>
-                <div className="space-y-2">
-                  {auditLog.map((entry) => (
-                    <div key={entry.id} className="text-xs text-muted-foreground">
-                      <p>{formatAuditEntry(entry)}</p>
-                      <p className="text-[10px]">{formatDistanceToNow(new Date(entry.created_at), { addSuffix: true })}</p>
-                    </div>
-                  ))}
-                </div>
-              </div>
-              <Separator />
-            </>
-          )}
-
-          <AlertDialog>
-            <AlertDialogTrigger asChild>
-              <Button variant="destructive" size="sm"><Trash2 className="h-4 w-4 mr-1" /> Delete Deal</Button>
-            </AlertDialogTrigger>
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>Delete deal?</AlertDialogTitle>
-                <AlertDialogDescription>This will permanently delete "{deal.title}" and cannot be undone.</AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>Cancel</AlertDialogCancel>
-                <AlertDialogAction onClick={handleDelete}>Delete</AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
-        </div>
+        )}
       </SheetContent>
-      <CreateTaskDialog open={taskDialogOpen} onOpenChange={setTaskDialogOpen} defaultDealId={deal.id} />
     </Sheet>
+  );
+}
+
+function DealDetailBody({ deal, stagesProp, onClose }: { deal: Deal; stagesProp?: PipelineStage[]; onClose: () => void }) {
+  const { organization, user, userRole, can, hasFeature } = useAuth();
+  const canDelete = canModifyRecord(userRole, user?.id, deal, "delete");
+  const canReassign = can("deals.reassign");
+  const hasHistory = hasFeature("audit_history");
+  const currency = organization?.currency;
+  const { toast } = useToast();
+  const confirm = useConfirm();
+  const updateDeal = useUpdateDeal();
+  const moveDeal = useMoveDeal();
+  const deleteDeal = useDeleteDeal();
+  const { byId } = useWorkspaceMembers();
+  const { data: fetchedStages } = usePipelineStages(deal.pipeline_id);
+  const stages = fetchedStages?.length ? fetchedStages : stagesProp ?? [];
+  const stage = stages.find((s) => s.id === deal.stage_id);
+  const outcome = stageOutcome(stage);
+  const wonStage = stages.find((s) => s.is_won);
+  const lostStage = stages.find((s) => s.is_lost);
+  const reopenStage = [...stages].reverse().find((s) => !s.is_won && !s.is_lost);
+
+  const [tab, setTab] = useState("overview");
+  const [lostPrompt, setLostPrompt] = useState<PipelineStage | null>(null);
+  const stageStatus = useSaveStatus();
+  const ownerStatus = useSaveStatus();
+  const companyStatus = useSaveStatus();
+  const contactStatus = useSaveStatus();
+
+  const save = async (patch: Record<string, unknown>) => {
+    try {
+      await updateDeal.mutateAsync({ id: deal.id, ...patch });
+    } catch (err) {
+      toast({ title: "Couldn't save change", description: errorMessage(err), variant: "destructive" });
+      throw err;
+    }
+  };
+
+  const move = async (target: PipelineStage, lostReason?: string) => {
+    await stageStatus.run(async () => {
+      try {
+        await moveDeal.mutateAsync({ deal, stage: target, lostReason });
+        toast({ title: target.is_won ? "Deal won" : target.is_lost ? "Deal marked as lost" : `Moved to ${target.name}`, variant: "success" });
+      } catch (err) {
+        toast({ title: "Couldn't move deal", description: errorMessage(err), variant: "destructive" });
+        throw err;
+      }
+    });
+  };
+
+  const requestMove = (target: PipelineStage) => {
+    if (target.id === deal.stage_id) return;
+    if (target.is_lost) setLostPrompt(target);
+    else void move(target);
+  };
+
+  const handleDelete = async () => {
+    if (!(await confirm({ title: `Delete “${deal.title}”?`, description: "The deal is permanently deleted. Linked activities and tasks stay but lose the link.", confirmLabel: "Delete deal" }))) return;
+    deleteDeal.mutate(deal.id, {
+      onSuccess: () => {
+        toast({ title: "Deal deleted", variant: "success" });
+        onClose();
+      },
+      onError: (err) => toast({ title: "Couldn't delete deal", description: errorMessage(err), variant: "destructive" }),
+    });
+  };
+
+  const overdue = isDealOverdue(deal, stage);
+
+  return (
+    <>
+      <SheetHeader className="space-y-3 border-b px-6 pb-4 pt-6 text-left">
+        <div className="flex flex-wrap items-center gap-2 pr-8 text-xs">
+          <span className="inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 font-medium">
+            <span className="h-2 w-2 rounded-full" style={{ backgroundColor: stage?.color }} aria-hidden />
+            {stage?.name ?? "Unknown stage"}
+          </span>
+          {outcome === "won" && <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 font-medium text-emerald-700 dark:text-emerald-300">Won{deal.won_at ? ` · ${formatDate(deal.won_at)}` : ""}</span>}
+          {outcome === "lost" && <span className="rounded-full bg-destructive/10 px-2 py-0.5 font-medium text-destructive">Lost{deal.lost_at ? ` · ${formatDate(deal.lost_at)}` : ""}</span>}
+          <span className="ml-auto text-sm font-semibold tabular-nums">{formatCurrency(deal.value, currency)}</span>
+        </div>
+        <SheetTitle className="sr-only">{deal.title}</SheetTitle>
+        <SheetDescription className="sr-only">Deal details, activity, tasks, notes and history.</SheetDescription>
+        <InlineField
+          id="deal-title-inline"
+          label="Deal name"
+          value={deal.title}
+          validate={(v) => (!v ? "Name can't be empty" : v.length > 200 ? "Keep it under 200 characters" : null)}
+          onSave={(v) => save({ title: v })}
+          displayClassName="text-lg font-semibold"
+        />
+        <div className="flex flex-wrap items-center gap-2">
+          {outcome === "open" && wonStage && (
+            <Button size="sm" variant="outline" className="gap-1.5" onClick={() => requestMove(wonStage)} disabled={moveDeal.isPending}>
+              <Trophy className="h-4 w-4" aria-hidden /> Mark won
+            </Button>
+          )}
+          {outcome === "open" && lostStage && (
+            <Button size="sm" variant="outline" className="gap-1.5" onClick={() => requestMove(lostStage)} disabled={moveDeal.isPending}>
+              <XCircle className="h-4 w-4" aria-hidden /> Mark lost
+            </Button>
+          )}
+          {outcome !== "open" && reopenStage && (
+            <Button size="sm" variant="outline" className="gap-1.5" onClick={() => requestMove(reopenStage)} disabled={moveDeal.isPending}>
+              <RotateCcw className="h-4 w-4" aria-hidden /> Reopen
+            </Button>
+          )}
+          {moveDeal.isPending && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" aria-label="Saving" />}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button size="icon" variant="ghost" className="ml-auto h-9 w-9" aria-label="More actions">
+                <MoreHorizontal className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onSelect={() => setTab("activity")}>Log activity</DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => setTab("tasks")}>Add task</DropdownMenuItem>
+              {canDelete && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onSelect={handleDelete} className="text-destructive focus:text-destructive">
+                    <Trash2 className="mr-2 h-4 w-4" aria-hidden /> Delete deal
+                  </DropdownMenuItem>
+                </>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </SheetHeader>
+
+      <Tabs value={tab} onValueChange={setTab} className="flex min-h-0 flex-1 flex-col">
+        <div className="overflow-x-auto border-b px-6">
+          <TabsList className="my-2 h-9">
+            <TabsTrigger value="overview" className="text-xs sm:text-sm">Overview</TabsTrigger>
+            <TabsTrigger value="activity" className="text-xs sm:text-sm">Activity</TabsTrigger>
+            <TabsTrigger value="tasks" className="text-xs sm:text-sm">Tasks</TabsTrigger>
+            <TabsTrigger value="notes" className="text-xs sm:text-sm">Notes</TabsTrigger>
+            <TabsTrigger value="history" className="gap-1 text-xs sm:text-sm">
+              {!hasHistory && <Lock className="h-3 w-3" aria-label="Not included in your plan" />}
+              History
+            </TabsTrigger>
+          </TabsList>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
+          <TabsContent value="overview" className="mt-0 space-y-5">
+            <div className="grid grid-cols-1 gap-x-6 gap-y-4 sm:grid-cols-2">
+              <InlineField
+                id="deal-value-inline"
+                label={`Value (${currency ?? "USD"})`}
+                type="number"
+                value={String(deal.value ?? 0)}
+                display={<span className="font-medium tabular-nums">{formatCurrency(deal.value, currency)}</span>}
+                validate={(v) => (v === "" || Number.isNaN(Number(v)) || Number(v) < 0 ? "Enter an amount of 0 or more" : null)}
+                onSave={(v) => save({ value: Number(v) })}
+                inputProps={{ min: 0, step: "any", inputMode: "decimal" }}
+              />
+              <InlineField
+                id="deal-probability-inline"
+                label="Probability"
+                type="number"
+                value={String(deal.probability ?? 0)}
+                display={<span className="tabular-nums">{deal.probability}%</span>}
+                validate={(v) => (v === "" || Number.isNaN(Number(v)) || Number(v) < 0 || Number(v) > 100 ? "Enter a number from 0 to 100" : null)}
+                onSave={(v) => save({ probability: Math.round(Number(v)) })}
+                inputProps={{ min: 0, max: 100, inputMode: "numeric" }}
+              />
+              <FieldShell label="Stage" htmlFor="deal-stage-select" status={stageStatus.status}>
+                <Select value={deal.stage_id} onValueChange={(id) => { const s = stages.find((x) => x.id === id); if (s) requestMove(s); }}>
+                  <SelectTrigger id="deal-stage-select" className="h-9 text-sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {stages.map((s) => (
+                      <SelectItem key={s.id} value={s.id}>
+                        <span className="flex items-center gap-2">
+                          <span className="h-2 w-2 rounded-full" style={{ backgroundColor: s.color }} aria-hidden />
+                          {s.name}
+                        </span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </FieldShell>
+              <FieldShell label="Owner" htmlFor="deal-owner-picker" status={ownerStatus.status}>
+                <MemberPicker
+                  id="deal-owner-picker"
+                  value={deal.owner_id}
+                  className="h-9"
+                  disabled={!canReassign}
+                  selectedLabel={!canReassign && deal.owner_id && deal.owner_id === user?.id ? "You" : undefined}
+                  onChange={(v) => void ownerStatus.run(() => save({ owner_id: v }))}
+                />
+                {!canReassign && <p className="mt-1 text-xs text-muted-foreground">Only managers and admins can reassign deals.</p>}
+              </FieldShell>
+              <InlineField
+                id="deal-close-inline"
+                label="Close date"
+                type="date"
+                value={deal.close_date?.slice(0, 10) ?? ""}
+                emptyText="Set a date"
+                display={<span className={cn(overdue && "font-medium text-destructive")}>{deal.close_date ? formatDate(deal.close_date) : ""}{overdue ? " · overdue" : ""}</span>}
+                onSave={(v) => save({ close_date: v || null })}
+              />
+              <FieldShell label="Company" htmlFor="deal-company-picker" status={companyStatus.status}>
+                <CompanyPicker
+                  id="deal-company-picker"
+                  value={deal.company_id}
+                  selectedLabel={deal.companies?.name}
+                  className="h-9"
+                  onChange={(v) => void companyStatus.run(() => save({ company_id: v }))}
+                />
+              </FieldShell>
+              <FieldShell label="Contact" htmlFor="deal-contact-picker" status={contactStatus.status}>
+                <ContactPicker
+                  id="deal-contact-picker"
+                  value={deal.contact_id}
+                  companyId={deal.company_id}
+                  selectedLabel={deal.contacts ? `${deal.contacts.first_name} ${deal.contacts.last_name}` : null}
+                  className="h-9"
+                  onChange={(v) => void contactStatus.run(() => save({ contact_id: v }))}
+                />
+              </FieldShell>
+              {outcome === "lost" && (
+                <InlineField
+                  id="deal-lost-reason-inline"
+                  label="Lost reason"
+                  value={deal.lost_reason ?? ""}
+                  emptyText="Add a reason"
+                  onSave={(v) => save({ lost_reason: v || null })}
+                />
+              )}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Created {format(new Date(deal.created_at), "MMM d, yyyy")}
+              {deal.created_by && byId.get(deal.created_by) ? ` by ${memberName(byId.get(deal.created_by))}` : ""} · Updated {formatRelativeDate(deal.updated_at)}
+            </p>
+          </TabsContent>
+
+          <TabsContent value="activity" className="mt-0 space-y-4">
+            <ActivityComposer dealId={deal.id} contactId={deal.contact_id} />
+            <DealActivities dealId={deal.id} />
+          </TabsContent>
+
+          <TabsContent value="tasks" className="mt-0 space-y-4">
+            <QuickAddTask dealId={deal.id} contactId={deal.contact_id ?? undefined} />
+            <DealTasks dealId={deal.id} />
+          </TabsContent>
+
+          <TabsContent value="notes" className="mt-0">
+            <DealNotes deal={deal} onSave={(notes) => save({ notes })} />
+          </TabsContent>
+
+          <TabsContent value="history" className="mt-0">
+            {hasHistory ? (
+              <DealHistory deal={deal} members={byId} currency={currency} />
+            ) : (
+              <UpgradePrompt feature="audit_history" className="py-10" />
+            )}
+          </TabsContent>
+        </div>
+      </Tabs>
+
+      <LostReasonDialog
+        open={!!lostPrompt}
+        dealTitle={deal.title}
+        stageName={lostPrompt?.name}
+        pending={moveDeal.isPending}
+        onCancel={() => setLostPrompt(null)}
+        onConfirm={async (reason) => {
+          const target = lostPrompt;
+          if (!target) return;
+          await move(target, reason).catch(() => undefined);
+          setLostPrompt(null);
+        }}
+      />
+    </>
+  );
+}
+
+function DealActivities({ dealId }: { dealId: string }) {
+  const { data, isLoading, error, refetch } = useActivities({ deal_id: dealId, limit: 100 });
+  const [editing, setEditing] = useState<Activity | null>(null);
+  if (isLoading) return <ListSkeleton rows={3} />;
+  if (error) return <ErrorState compact error={error} onRetry={() => refetch()} />;
+  if (!data?.length) return <EmptyState compact icon={ActivityIcon} title="No activity yet" description="Log calls, emails, meetings and notes above." />;
+  return (
+    <>
+      <ol className="space-y-2" aria-label="Activity timeline">
+        {data.map((a) => (
+          <li key={a.id}>
+            <ActivityItem activity={a} hideDeal onOpen={setEditing} />
+          </li>
+        ))}
+      </ol>
+      <ActivityDetailDialog activity={editing} open={!!editing} onOpenChange={(o) => !o && setEditing(null)} />
+    </>
+  );
+}
+
+function DealTasks({ dealId }: { dealId: string }) {
+  const { data, isLoading, error, refetch } = useTasks({ deal_id: dealId, limit: 200 });
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selected = useMemo(() => data?.find((t) => t.id === selectedId) ?? null, [data, selectedId]);
+  if (isLoading) return <ListSkeleton rows={3} />;
+  if (error) return <ErrorState compact error={error} onRetry={() => refetch()} />;
+  if (!data?.length) return <EmptyState compact icon={CheckSquare} title="No tasks on this deal" description="Add the next step above and press Enter." />;
+  return (
+    <>
+      <ul className="space-y-2" aria-label="Tasks">
+        {data.map((t) => (
+          <li key={t.id}>
+            <TaskItem task={t} hideDeal onClick={() => setSelectedId(t.id)} />
+          </li>
+        ))}
+      </ul>
+      <TaskDetailDialog task={selected} open={!!selected} onOpenChange={(o) => !o && setSelectedId(null)} />
+    </>
+  );
+}
+
+function DealNotes({ deal, onSave }: { deal: Deal; onSave: (notes: string | null) => Promise<void> }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(deal.notes ?? "");
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (!editing) setDraft(deal.notes ?? "");
+  }, [deal.notes, editing]);
+
+  if (editing) {
+    return (
+      <div className="space-y-3">
+        <RichTextEditor value={draft} onChange={setDraft} rows={8} />
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" size="sm" onClick={() => setEditing(false)} disabled={saving}>
+            Cancel
+          </Button>
+          <Button
+            size="sm"
+            disabled={saving}
+            onClick={async () => {
+              setSaving(true);
+              try {
+                await onSave(draft.trim() || null);
+                setEditing(false);
+              } catch {
+                /* toast shown by onSave; keep the draft */
+              } finally {
+                setSaving(false);
+              }
+            }}
+          >
+            {saving ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Saving…
+              </>
+            ) : (
+              "Save notes"
+            )}
+          </Button>
+        </div>
+      </div>
+    );
+  }
+  if (!deal.notes) {
+    return (
+      <EmptyState
+        compact
+        icon={NotebookPen}
+        title="No notes yet"
+        description="Capture context, requirements and next steps."
+        action={
+          <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
+            Add notes
+          </Button>
+        }
+      />
+    );
+  }
+  return (
+    <div className="space-y-3">
+      <div className="flex justify-end">
+        <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
+          Edit notes
+        </Button>
+      </div>
+      <MarkdownView value={deal.notes} className="prose prose-sm max-w-none break-words text-sm text-foreground dark:prose-invert" />
+    </div>
+  );
+}
+
+const FIELD_LABELS: Record<string, string> = {
+  stage_id: "Stage",
+  value: "Value",
+  probability: "Probability",
+  owner_id: "Owner",
+  close_date: "Close date",
+  title: "Name",
+  company_id: "Company",
+  contact_id: "Contact",
+  lost_reason: "Lost reason",
+};
+
+function describeEntry(e: AuditEntry, members: Map<string, WorkspaceMember>, currency?: string): string {
+  switch (e.field) {
+    case "stage_id":
+      return `Moved from ${e.old_stage_name ?? "a deleted stage"} to ${e.new_stage_name ?? "a deleted stage"}`;
+    case "value":
+      return `Value changed from ${formatCurrency(Number(e.old_value || 0), currency)} to ${formatCurrency(Number(e.new_value || 0), currency)}`;
+    case "probability":
+      return `Probability changed from ${e.old_value ?? 0}% to ${e.new_value ?? 0}%`;
+    case "owner_id": {
+      const from = e.old_value ? memberName(members.get(e.old_value)) : "nobody";
+      const to = e.new_value ? memberName(members.get(e.new_value)) : "nobody";
+      return `Owner changed from ${from} to ${to}`;
+    }
+    case "close_date":
+      return `Close date ${e.new_value ? `set to ${formatDate(e.new_value)}` : "cleared"}`;
+    default: {
+      const label = FIELD_LABELS[e.field] ?? e.field.replace(/_/g, " ");
+      return e.new_value ? `${label} changed to “${e.new_value}”` : `${label} cleared`;
+    }
+  }
+}
+
+function DealHistory({ deal, members, currency }: { deal: Deal; members: Map<string, WorkspaceMember>; currency?: string }) {
+  const { data, isLoading, error, refetch } = useDealAuditLog(deal.id);
+  if (isLoading) return <ListSkeleton rows={3} />;
+  if (error) return <ErrorState compact error={error} onRetry={() => refetch()} />;
+  const creator = deal.created_by ? members.get(deal.created_by) : undefined;
+  return (
+    <ol className="relative space-y-4 border-l border-border pl-5" aria-label="Deal history">
+      {(data ?? []).map((e) => {
+        const actor = e.user_id ? members.get(e.user_id) : undefined;
+        return (
+          <li key={e.id} className="relative">
+            <span className="absolute -left-[25px] top-1.5 h-2 w-2 rounded-full bg-muted-foreground/60" aria-hidden />
+            <p className="text-sm">{describeEntry(e, members, currency)}</p>
+            <p className="text-xs text-muted-foreground">
+              {actor ? `${memberName(actor)} · ` : ""}
+              <time dateTime={e.created_at} title={format(new Date(e.created_at), "PPpp")}>
+                {formatRelativeDate(e.created_at)}
+              </time>
+            </p>
+          </li>
+        );
+      })}
+      <li className="relative">
+        <span className="absolute -left-[25px] top-1.5 h-2 w-2 rounded-full bg-foreground" aria-hidden />
+        <p className="flex items-center gap-1.5 text-sm">
+          <History className="h-3.5 w-3.5 text-muted-foreground" aria-hidden /> Deal created
+        </p>
+        <p className="text-xs text-muted-foreground">
+          {creator ? `${memberName(creator)} · ` : ""}
+          {format(new Date(deal.created_at), "MMM d, yyyy")}
+        </p>
+      </li>
+    </ol>
   );
 }

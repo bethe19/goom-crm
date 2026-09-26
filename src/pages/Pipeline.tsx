@@ -1,199 +1,432 @@
-import { useState, useMemo, useEffect } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
+import { Columns3, Database, Kanban, List, Loader2, Plus, SearchX, Settings2 } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
-import { usePipelines, usePipelineStages, PipelineStage } from "@/hooks/usePipelineStages";
-import { useDeals, Deal } from "@/hooks/useDeals";
+import { usePipelines, usePipelineStages, type PipelineStage } from "@/hooks/usePipelineStages";
+import { useDeal, useDeals, useMoveDeal, type Deal } from "@/hooks/useDeals";
+import { useStageEnteredAt } from "@/hooks/useDealAuditLog";
+import { useDebounce } from "@/hooks/useDebounce";
+import { useToast } from "@/hooks/use-toast";
+import { loadSampleData } from "@/lib/sampleData";
+import { formatCurrency } from "@/lib/formatters";
+import { errorMessage } from "@/components/settings/validation";
+import { PageBanner } from "@/components/PageBanner";
+import { RepScopeNotice } from "@/components/settings/AccessNotice";
+import { EmptyState, ErrorState } from "@/components/common/States";
+import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { KanbanBoard } from "@/components/pipeline/KanbanBoard";
+import { DealsTable } from "@/components/pipeline/DealsTable";
 import { CreateDealDialog } from "@/components/pipeline/CreateDealDialog";
 import { DealDetailSheet } from "@/components/pipeline/DealDetailSheet";
 import { PipelineFilters } from "@/components/pipeline/PipelineFilters";
-import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Badge } from "@/components/ui/badge";
-import { supabase } from "@/integrations/supabase/client";
-import { useToast } from "@/hooks/use-toast";
-import { PageBanner } from "@/components/PageBanner";
-import { Plus, Kanban, Sparkles, UploadCloud } from "lucide-react";
-import { getDemoDeals, DEMO_STAGES, seedSupabaseWithDemoData } from "@/lib/demoData";
-import { useQueryClient } from "@tanstack/react-query";
+import { LostReasonDialog } from "@/components/pipeline/LostReasonDialog";
+import { useWorkspaceMembers } from "@/components/pipeline/useWorkspaceMembers";
+import { EMPTY_DEAL_FILTERS, daysSince, filterDeals, hasActiveDealFilters, summarizeDeals, type DealFilters } from "@/components/pipeline/dealUtils";
+
+const PIPELINE_KEY = "goom.pipeline.selected";
+const VIEW_KEY = "goom.pipeline.view";
+type ViewMode = "board" | "list";
+
+function readStorage(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+function writeStorage(key: string, value: string) {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    /* storage unavailable (private mode) — the choice just isn't remembered */
+  }
+}
+
+function BoardSkeleton() {
+  return (
+    <div className="flex gap-3 overflow-hidden" aria-busy="true" aria-label="Loading pipeline">
+      {Array.from({ length: 5 }).map((_, i) => (
+        <div key={i} className="w-[85vw] max-w-[320px] shrink-0 space-y-2 sm:w-72">
+          <Skeleton className="h-6 w-2/3" />
+          <div className="space-y-2 rounded-xl border border-border/60 bg-muted/30 p-2">
+            {Array.from({ length: 3 - (i % 2) }).map((__, j) => (
+              <Skeleton key={j} className="h-[92px] w-full rounded-lg" />
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 export default function Pipeline() {
-  const { user, isDemoMode } = useAuth();
+  const { user, organization, can, hasFeature } = useAuth();
+  // "Days in stage" comes from the deal audit log, which is an Enterprise feature.
+  const hasStageHistory = hasFeature("audit_history");
+  const seesAll = can("records.view_all");
+  const canManagePipelines = can("pipelines.manage");
+  const currency = organization?.currency ?? "USD";
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const { data: pipelines, isLoading: pipelinesLoading } = usePipelines();
-  const pipeline = pipelines?.[0];
-  const { data: liveStages, isLoading: stagesLoading } = usePipelineStages(pipeline?.id);
-  const { data: liveDeals, isLoading: dealsLoading } = useDeals(pipeline?.id);
+  const [searchParams, setSearchParams] = useSearchParams();
 
-  const [search, setSearch] = useState("");
+  // ── Pipeline selection: ?pipeline= → remembered choice → first pipeline ──
+  const pipelinesQ = usePipelines();
+  const pipelines = useMemo(() => pipelinesQ.data ?? [], [pipelinesQ.data]);
+  const [storedPipeline, setStoredPipeline] = useState(() => readStorage(PIPELINE_KEY));
+  const urlPipeline = searchParams.get("pipeline");
+  const pipeline = pipelines.find((p) => p.id === urlPipeline) ?? pipelines.find((p) => p.id === storedPipeline) ?? pipelines[0];
+
+  const selectPipeline = useCallback(
+    (id: string) => {
+      writeStorage(PIPELINE_KEY, id);
+      setStoredPipeline(id);
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.set("pipeline", id);
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
+
+  const stagesQ = usePipelineStages(pipeline?.id);
+  const dealsQ = useDeals(pipeline?.id);
+  const enteredQ = useStageEnteredAt(pipeline?.id, { enabled: hasStageHistory });
+  const { members, byId } = useWorkspaceMembers();
+  const stages = useMemo(() => stagesQ.data ?? [], [stagesQ.data]);
+  const deals = useMemo(() => dealsQ.data ?? [], [dealsQ.data]);
+
+  // ── Filters & view ──
+  const [filters, setFilters] = useState<DealFilters>(EMPTY_DEAL_FILTERS);
+  const debouncedSearch = useDebounce(filters.search, 250);
+  const effectiveFilters = useMemo(() => ({ ...filters, search: debouncedSearch }), [filters, debouncedSearch]);
+  const filtered = useMemo(() => filterDeals(deals, effectiveFilters, user?.id), [deals, effectiveFilters, user?.id]);
+  const filtersActive = hasActiveDealFilters(filters);
+  const summary = summarizeDeals(filtered);
+  const [view, setView] = useState<ViewMode>(() => (readStorage(VIEW_KEY) === "list" ? "list" : "board"));
+  const changeView = (v: ViewMode) => {
+    setView(v);
+    writeStorage(VIEW_KEY, v);
+  };
+
+  // ── Dialogs, sheet and URL params ──
   const [createOpen, setCreateOpen] = useState(false);
   const [createStageId, setCreateStageId] = useState<string | undefined>();
-  const [selectedDeal, setSelectedDeal] = useState<Deal | null>(null);
-  const [searchParams, setSearchParams] = useSearchParams();
-  const [seeding, setSeeding] = useState(false);
+  const [openDealId, setOpenDealId] = useState<string | null>(null);
+  const openDealFromList = deals.find((d) => d.id === openDealId) ?? null;
+  const { data: openedDeal } = useDeal(openDealFromList ? null : openDealId);
+  const switchToOpenedPipeline = useRef(false);
 
-  // Fallback stages & deals strictly when in demo mode
-  const useFallback = isDemoMode;
-
-  const effectiveStages: PipelineStage[] = useMemo(() => {
-    if (liveStages && liveStages.length > 0) {
-      return liveStages;
-    }
-    return DEMO_STAGES.map((s) => ({
-      id: s.id,
-      pipeline_id: activePipeline?.id || "default-pipeline",
-      name: s.name,
-      color: s.color,
-      position: s.position,
-      created_at: "2026-01-01T00:00:00Z",
-    }));
-  }, [liveStages, activePipeline]);
-
-  const effectiveDeals: Deal[] = useMemo(() => {
-    if (isDemoMode) {
-      const demo = getDemoDeals();
-      return demo.map((d) => ({
-        id: d.id,
-        title: d.title,
-        company_id: null,
-        contact_id: null,
-        pipeline_id: "demo-pipeline",
-        stage_id: d.stage_id,
-        owner_id: "demo-user",
-        value: d.value,
-        probability: d.probability,
-        close_date: d.close_date,
-        notes: d.notes || null,
-        created_by: "demo-user",
-        created_at: d.created_at,
-        updated_at: d.created_at,
-        companies: { id: "c-1", name: d.company_name },
-        contacts: {
-          id: "ct-1",
-          first_name: d.contact_name.split(" ")[0],
-          last_name: d.contact_name.split(" ")[1] || "",
-        },
-        priority: d.priority,
-        ai_score: d.ai_score,
-      } as any));
-    }
-    return liveDeals || [];
-  }, [isDemoMode, liveDeals]);
-
-  const [dealsState, setDealsState] = useState<Deal[]>(effectiveDeals);
-
-  useEffect(() => {
-    setDealsState(effectiveDeals);
-  }, [effectiveDeals]);
-
-  const handleDealMove = (dealId: string, stageId: string) => {
-    setDealsState((prev) =>
-      prev.map((d) => (d.id === dealId ? { ...d, stage_id: stageId } : d))
-    );
-  };
-
-  // Open deal from search param
   useEffect(() => {
     const openId = searchParams.get("open");
-    if (openId && dealsState) {
-      const found = dealsState.find((d) => d.id === openId);
-      if (found) {
-        setSelectedDeal(found);
-        searchParams.delete("open");
-        setSearchParams(searchParams, { replace: true });
-      }
+    const isNew = searchParams.get("new");
+    if (!openId && !isNew) return;
+    if (openId) {
+      setOpenDealId(openId);
+      switchToOpenedPipeline.current = true;
     }
-  }, [searchParams, dealsState, setSearchParams]);
+    if (isNew) {
+      setCreateStageId(undefined);
+      setCreateOpen(true);
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete("open");
+    next.delete("new");
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
 
-  const filteredDeals = useMemo(() => {
-    if (!dealsState) return [];
-    if (!search) return dealsState;
-    const s = search.toLowerCase();
-    return dealsState.filter(
-      (d) =>
-        d.title.toLowerCase().includes(s) ||
-        d.companies?.name?.toLowerCase().includes(s) ||
-        d.contacts?.first_name?.toLowerCase().includes(s) ||
-        d.contacts?.last_name?.toLowerCase().includes(s)
-    );
-  }, [dealsState, search]);
+  // A deal opened via ?open= may live in another pipeline: show that pipeline behind the sheet.
+  useEffect(() => {
+    if (switchToOpenedPipeline.current && openedDeal && pipeline && openedDeal.pipeline_id !== pipeline.id) {
+      switchToOpenedPipeline.current = false;
+      selectPipeline(openedDeal.pipeline_id);
+    }
+  }, [openedDeal, pipeline, selectPipeline]);
 
-  const handleSeedCloudPipeline = async () => {
-    if (!user) return;
-    setSeeding(true);
-    const res = await seedSupabaseWithDemoData(supabase, user.id);
-    setSeeding(false);
-    if (res.success) {
-      toast({ title: "Pipeline Seeded! 🎉", description: "Sample enterprise deals added to your cloud pipeline." });
-      queryClient.invalidateQueries();
-    } else {
-      toast({ title: "Error", description: res.error, variant: "destructive" });
+  // ── Moving deals (drag and drop or "Move to…") ──
+  const moveDeal = useMoveDeal();
+  const [pendingLost, setPendingLost] = useState<{ deal: Deal; stage: PipelineStage } | null>(null);
+
+  const doMove = useCallback(
+    (deal: Deal, stage: PipelineStage, lostReason?: string, undoable = true) => {
+      const from = stages.find((s) => s.id === deal.stage_id);
+      moveDeal.mutate(
+        { deal, stage, lostReason },
+        {
+          onSuccess: () => {
+            toast({
+              title: stage.is_won ? `Won: ${deal.title}` : stage.is_lost ? `Lost: ${deal.title}` : `Moved to ${stage.name}`,
+              description: stage.is_won || stage.is_lost ? undefined : deal.title,
+              action: undoable && from ? { label: "Undo", onClick: () => doMove({ ...deal, stage_id: stage.id }, from, deal.lost_reason ?? undefined, false) } : undefined,
+            });
+          },
+          onError: (err) => {
+            toast({ title: `Couldn't move “${deal.title}”`, description: errorMessage(err), variant: "destructive" });
+          },
+        },
+      );
+    },
+    [moveDeal, stages, toast],
+  );
+
+  const handleMove = useCallback(
+    (deal: Deal, stage: PipelineStage) => {
+      if (deal.stage_id === stage.id) return;
+      if (stage.is_lost) setPendingLost({ deal, stage });
+      else doMove(deal, stage);
+    },
+    [doMove],
+  );
+
+  // ── Card helpers ──
+  const ownerOf = useCallback((deal: Deal) => (deal.owner_id ? byId.get(deal.owner_id) : undefined), [byId]);
+  const entered = enteredQ.data;
+  const stageInfo = useCallback(
+    (deal: Deal) => {
+      if (!hasStageHistory || !entered) return { days: null, since: null };
+      const since = entered[deal.id] ?? deal.created_at;
+      return { days: daysSince(since), since };
+    },
+    [entered, hasStageHistory],
+  );
+
+  // ── Empty-workspace actions ──
+  const [loadingSample, setLoadingSample] = useState(false);
+  const handleLoadSample = async () => {
+    setLoadingSample(true);
+    try {
+      const r = await loadSampleData();
+      await queryClient.invalidateQueries();
+      toast({ title: "Sample data loaded", description: `${r.deals} deals, ${r.companies} companies and ${r.contacts} contacts added.`, variant: "success" });
+    } catch (err) {
+      toast({ title: "Couldn't load sample data", description: errorMessage(err), variant: "destructive" });
+    } finally {
+      setLoadingSample(false);
+    }
+  };
+  const [creatingPipeline, setCreatingPipeline] = useState(false);
+  const handleCreatePipeline = async () => {
+    setCreatingPipeline(true);
+    try {
+      const { error } = await supabase.rpc("seed_default_pipeline");
+      if (error) throw error;
+      await queryClient.invalidateQueries({ queryKey: ["pipelines"] });
+      toast({ title: "Pipeline created", variant: "success" });
+    } catch (err) {
+      toast({ title: "Couldn't create pipeline", description: errorMessage(err), variant: "destructive" });
+    } finally {
+      setCreatingPipeline(false);
     }
   };
 
-  const isLoading = !useFallback && (pipelinesLoading || stagesLoading || dealsLoading);
+  const openCreate = (stageId?: string) => {
+    setCreateStageId(stageId);
+    setCreateOpen(true);
+  };
+
+  // Only offered to roles that see every deal: an empty rep view doesn't mean the workspace is empty.
+  const sampleButton = (
+    <Button variant="outline" onClick={handleLoadSample} disabled={loadingSample}>
+      {loadingSample ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Database className="h-4 w-4" aria-hidden />}
+      {loadingSample ? "Loading sample data…" : "Load sample data"}
+    </Button>
+  );
+
+  // ── Content ──
+  let content: React.ReactNode;
+  if (pipelinesQ.isLoading) {
+    content = <BoardSkeleton />;
+  } else if (pipelinesQ.error) {
+    content = <ErrorState title="Couldn't load pipelines" error={pipelinesQ.error} onRetry={() => pipelinesQ.refetch()} />;
+  } else if (!pipeline) {
+    content = (
+      <EmptyState
+        icon={Kanban}
+        title="Set up your pipeline"
+        description={
+          canManagePipelines
+            ? "Create a pipeline with standard sales stages, or explore with sample data."
+            : "This workspace doesn't have a pipeline yet. Ask an admin or manager to create one."
+        }
+        action={
+          canManagePipelines ? (
+            <Button onClick={handleCreatePipeline} disabled={creatingPipeline}>
+              {creatingPipeline ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Plus className="h-4 w-4" aria-hidden />}
+              {creatingPipeline ? "Creating…" : "Create pipeline"}
+            </Button>
+          ) : undefined
+        }
+        secondaryAction={canManagePipelines ? sampleButton : undefined}
+      />
+    );
+  } else if (stagesQ.isLoading || dealsQ.isLoading) {
+    content = <BoardSkeleton />;
+  } else if (stagesQ.error || dealsQ.error) {
+    content = (
+      <ErrorState
+        title="Couldn't load this pipeline"
+        error={stagesQ.error ?? dealsQ.error}
+        onRetry={() => {
+          stagesQ.refetch();
+          dealsQ.refetch();
+        }}
+      />
+    );
+  } else if (stages.length === 0) {
+    content = (
+      <EmptyState
+        icon={Columns3}
+        title="This pipeline has no stages"
+        description={
+          canManagePipelines
+            ? "Add stages in Settings to start tracking deals."
+            : "Ask an admin or manager to add stages to this pipeline."
+        }
+        action={
+          canManagePipelines ? (
+            <Button asChild variant="outline">
+              <Link to="/settings?tab=pipeline">
+                <Settings2 className="h-4 w-4" aria-hidden /> Pipeline settings
+              </Link>
+            </Button>
+          ) : undefined
+        }
+      />
+    );
+  } else if (deals.length === 0) {
+    content = (
+      <EmptyState
+        icon={Kanban}
+        title={seesAll ? "No deals yet" : "You don't have any deals yet"}
+        description={
+          seesAll
+            ? "Add your first deal to start tracking it through the pipeline."
+            : "Deals you create or that are assigned to you appear here."
+        }
+        action={
+          <Button onClick={() => openCreate(stages[0]?.id)}>
+            <Plus className="h-4 w-4" aria-hidden /> Add deal
+          </Button>
+        }
+        secondaryAction={seesAll ? sampleButton : undefined}
+      />
+    );
+  } else if (filtered.length === 0) {
+    content = (
+      <EmptyState
+        icon={SearchX}
+        title="No deals match your filters"
+        description="Try a different search or widen the filters."
+        action={
+          <Button variant="outline" onClick={() => setFilters(EMPTY_DEAL_FILTERS)}>
+            Clear filters
+          </Button>
+        }
+      />
+    );
+  } else if (view === "list") {
+    content = <DealsTable deals={filtered} stages={stages} currency={currency} membersById={byId} onOpen={(d) => setOpenDealId(d.id)} />;
+  } else {
+    content = (
+      <KanbanBoard
+        stages={stages}
+        deals={filtered}
+        currency={currency}
+        ownerOf={ownerOf}
+        stageInfo={stageInfo}
+        onDealClick={(d) => setOpenDealId(d.id)}
+        onAddDeal={openCreate}
+        onDealMove={handleMove}
+      />
+    );
+  }
+
+  const showToolbar = !!pipeline && stages.length > 0 && deals.length > 0;
 
   return (
     <div className="space-y-6">
       <PageBanner
-        title="Sales Pipeline"
-        description="Real-time deal flow, velocity telemetry, and drag-and-drop progression."
+        title="Pipeline"
+        description={seesAll ? "Track every deal from first conversation to close." : "Your deals, from first conversation to close."}
       >
         <div className="flex flex-wrap items-center gap-2">
-          {isDemoMode && (
-            <Badge variant="outline" className="text-[10px] font-semibold border-emerald-500/30 text-emerald-600 dark:text-emerald-400 bg-emerald-500/10">
-              <Sparkles className="h-3 w-3 mr-1" />
-              Beta Sandbox Active
-            </Badge>
+          {pipelines.length > 1 && pipeline && (
+            <Select value={pipeline.id} onValueChange={selectPipeline}>
+              <SelectTrigger className="h-10 w-[180px] text-sm" aria-label="Pipeline">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {pipelines.map((p) => (
+                  <SelectItem key={p.id} value={p.id}>
+                    {p.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           )}
-
-          <Button
-            className="h-9 text-xs font-medium"
-            onClick={() => {
-              setCreateStageId(effectiveStages[0]?.id);
-              setCreateOpen(true);
-            }}
-          >
-            <Plus className="h-4 w-4 mr-1.5" /> Create Deal
+          <ToggleGroup type="single" value={view} onValueChange={(v) => v && changeView(v as ViewMode)} variant="outline" aria-label="View">
+            <ToggleGroupItem value="board" aria-label="Board view" className="h-10 w-10 p-0">
+              <Kanban className="h-4 w-4" />
+            </ToggleGroupItem>
+            <ToggleGroupItem value="list" aria-label="List view" className="h-10 w-10 p-0">
+              <List className="h-4 w-4" />
+            </ToggleGroupItem>
+          </ToggleGroup>
+          <Button onClick={() => openCreate(stages[0]?.id)} disabled={!pipeline}>
+            <Plus className="h-4 w-4" aria-hidden /> New deal
           </Button>
         </div>
       </PageBanner>
 
-      <PipelineFilters search={search} onSearchChange={setSearch} />
-
-      {isLoading ? (
-        <div className="flex gap-4">
-          {Array.from({ length: 6 }).map((_, i) => (
-            <Skeleton key={i} className="h-[500px] w-[280px] flex-shrink-0 rounded-xl" />
-          ))}
+      {showToolbar && (
+        <div className="space-y-3">
+          <PipelineFilters
+            filters={filters}
+            onChange={(patch) => setFilters((f) => ({ ...f, ...patch }))}
+            onClear={() => setFilters(EMPTY_DEAL_FILTERS)}
+            members={members}
+            currentUserId={user?.id}
+            currency={currency}
+          />
+          <p className="text-xs text-muted-foreground tabular-nums" aria-live="polite">
+            {filtersActive ? `${summary.count} of ${deals.length} deals` : `${summary.count} ${summary.count === 1 ? "deal" : "deals"}`} ·{" "}
+            {formatCurrency(summary.total, currency)} total · {formatCurrency(summary.weighted, currency)} weighted
+          </p>
         </div>
-      ) : effectiveStages && effectiveStages.length > 0 ? (
-        <KanbanBoard
-          stages={effectiveStages}
-          deals={filteredDeals}
-          onDealClick={setSelectedDeal}
-          onDealMove={handleDealMove}
-          onAddDeal={(stageId) => {
-            setCreateStageId(stageId);
-            setCreateOpen(true);
-          }}
-        />
-      ) : null}
+      )}
 
-      <CreateDealDialog
-        open={createOpen}
-        onOpenChange={setCreateOpen}
-        pipelineId={pipeline?.id || "demo-pipeline"}
-        stages={effectiveStages}
-        defaultStageId={createStageId}
-      />
+      {!seesAll && <RepScopeNotice scope="deals" className="-mt-3" />}
+
+      {content}
+
+      <CreateDealDialog open={createOpen} onOpenChange={setCreateOpen} pipelineId={pipeline?.id} stages={stages} defaultStageId={createStageId} />
 
       <DealDetailSheet
-        deal={selectedDeal}
-        open={!!selectedDeal}
-        onOpenChange={(o) => !o && setSelectedDeal(null)}
-        stages={effectiveStages || []}
+        deal={openDealFromList}
+        dealId={openDealId}
+        open={!!openDealId}
+        onOpenChange={(o) => !o && setOpenDealId(null)}
+        stages={openDealFromList ? stages : undefined}
+      />
+
+      <LostReasonDialog
+        open={!!pendingLost}
+        dealTitle={pendingLost?.deal.title}
+        stageName={pendingLost?.stage.name}
+        onCancel={() => setPendingLost(null)}
+        onConfirm={(reason) => {
+          if (pendingLost) doMove(pendingLost.deal, pendingLost.stage, reason);
+          setPendingLost(null);
+        }}
       />
     </div>
   );

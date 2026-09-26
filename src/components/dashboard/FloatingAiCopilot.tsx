@@ -1,721 +1,525 @@
-import { useState, useMemo, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { AlertCircle, ArrowUp, Check, Copy, Loader2, RotateCcw, Sparkles, Square, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
-import { useToast } from "@/hooks/use-toast";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { MarkdownView } from "@/components/ui/rich-text-editor";
+import { Link } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
-import { formatCurrency } from "@/lib/formatters";
-import { useQuery } from "@tanstack/react-query";
-import { supabase } from "@/integrations/supabase/client";
-import { useCompanies } from "@/hooks/useCompanies";
-import { useContacts } from "@/hooks/useContacts";
-import { useActivities } from "@/hooks/useActivities";
-import { useTasks } from "@/hooks/useTasks";
-import { usePipelines, usePipelineStages } from "@/hooks/usePipelineStages";
+import { useToast } from "@/hooks/use-toast";
+import { sanitizeErrorMessage } from "@/lib/sanitize";
+import { cn } from "@/lib/utils";
 import {
-  askGroqCopilot,
-  CRMContextData,
-  CopilotResponse,
-  getGroqApiKey,
-} from "@/lib/groq";
-import {
-  getDemoDeals,
-  INITIAL_DEMO_COMPANIES,
-  INITIAL_DEMO_CONTACTS,
-  DEMO_STAGES,
-} from "@/lib/demoData";
-import {
-  Sparkles,
-  Zap,
-  AlertTriangle,
-  TrendingUp,
-  ArrowRight,
-  Send,
-  Bot,
-  Copy,
-  RefreshCw,
-  X,
-  Check,
-  Building2,
-} from "lucide-react";
+  AiAbortedError,
+  AiNotConfiguredError,
+  AiNotDeployedError,
+  AiPlanLimitError,
+  AiRateLimitError,
+  OPEN_ASSISTANT_EVENT,
+  buildAssistantSystemPrompt,
+  chat,
+  normalizeAiMarkdown,
+  trimHistory,
+  type AiMessage,
+} from "@/lib/ai";
+import { fetchWorkspaceSnapshot, summarizeWorkspace, toIsoDate } from "@/lib/aiContext";
 
-interface Message {
+type ErrorKind = "not_configured" | "not_deployed" | "plan_limit" | "rate_limit" | "stopped" | "generic";
+type Unavailable = "not_configured" | "not_deployed" | null;
+
+interface ChatItem {
   id: string;
-  sender: "user" | "copilot";
+  role: "user" | "assistant";
   content: string;
-  time: string;
-  actionPayload?: {
-    type: "email" | "task" | "deal";
-    label: string;
-    textToCopy?: string;
-  };
+  /** Set on assistant items that represent a failed turn (never sent back to the model). */
+  error?: ErrorKind;
 }
 
-interface FloatingAiCopilotProps {
-  deals?: any[];
-  totalValue?: number;
-}
+const CONTEXT_STALE_MS = 60_000;
 
-/**
- * Lightweight helper to format Markdown-like AI output into clean readable UI
- */
-function FormattedAiText({ text }: { text: string }) {
-  const lines = text.split("\n");
+let idCounter = 0;
+const nextId = () => `m${Date.now().toString(36)}${(idCounter++).toString(36)}`;
 
+function IconButton({
+  label,
+  onClick,
+  disabled,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  children: React.ReactNode;
+}) {
   return (
-    <div className="space-y-1.5 text-xs leading-relaxed">
-      {lines.map((line, idx) => {
-        const trimmed = line.trim();
-
-        // Heading 3
-        if (trimmed.startsWith("### ")) {
-          return (
-            <h4 key={idx} className="font-bold text-foreground text-xs mt-2 pt-1 border-b border-border/50 pb-0.5">
-              {trimmed.replace(/^###\s+/, "")}
-            </h4>
-          );
-        }
-
-        // Heading 2 or 1
-        if (trimmed.startsWith("## ") || trimmed.startsWith("# ")) {
-          return (
-            <h3 key={idx} className="font-bold text-foreground text-sm mt-2.5">
-              {trimmed.replace(/^#+\s+/, "")}
-            </h3>
-          );
-        }
-
-        // Bullet point
-        if (trimmed.startsWith("• ") || trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
-          const content = trimmed.replace(/^([•\-\*]\s+)/, "");
-          return (
-            <div key={idx} className="flex items-start gap-1.5 pl-1 my-0.5">
-              <span className="text-primary font-bold select-none">•</span>
-              <div>{renderInlineFormatting(content)}</div>
-            </div>
-          );
-        }
-
-        // Numbered list (e.g. "1. ")
-        const numMatch = trimmed.match(/^(\d+)\.\s+(.*)/);
-        if (numMatch) {
-          return (
-            <div key={idx} className="flex items-start gap-1.5 pl-1 my-0.5">
-              <span className="text-muted-foreground font-mono font-medium text-[11px] select-none">{numMatch[1]}.</span>
-              <div>{renderInlineFormatting(numMatch[2])}</div>
-            </div>
-          );
-        }
-
-        // Empty line
-        if (!trimmed) {
-          return <div key={idx} className="h-1" />;
-        }
-
-        // Standard line
-        return <p key={idx}>{renderInlineFormatting(trimmed)}</p>;
-      })}
-    </div>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8 text-muted-foreground hover:text-foreground"
+          onClick={onClick}
+          disabled={disabled}
+          aria-label={label}
+        >
+          {children}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
   );
 }
 
-function renderInlineFormatting(text: string) {
-  // Simple parser for bold **text** and code `text`
-  const parts = text.split(/(\*\*.*?\*\*|`.*?`)/g);
-  return parts.map((part, i) => {
-    if (part.startsWith("**") && part.endsWith("**")) {
-      return (
-        <strong key={i} className="font-semibold text-foreground">
-          {part.slice(2, -2)}
-        </strong>
-      );
-    }
-    if (part.startsWith("`") && part.endsWith("`")) {
-      return (
-        <code key={i} className="px-1 py-0.5 rounded bg-muted font-mono text-[11px] text-primary">
-          {part.slice(1, -1)}
-        </code>
-      );
-    }
-    return part;
-  });
-}
-
-export function FloatingAiCopilot({ deals: propDeals, totalValue: propTotalValue }: FloatingAiCopilotProps) {
+export function FloatingAiCopilot() {
+  const { organization, user, userRole, isAdmin, isPlatformAdmin, can } = useAuth();
+  const canBill = can("workspace.billing");
   const { toast } = useToast();
-  const { user, isDemoMode, userRole } = useAuth();
-  const [isOpen, setIsOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<"signals" | "chat">("chat");
-  const [inputQuery, setInputQuery] = useState("");
-  const [isThinking, setIsThinking] = useState(false);
+  const queryClient = useQueryClient();
+
+  const [open, setOpen] = useState(false);
+  const [messages, setMessages] = useState<ChatItem[]>([]);
+  const [input, setInput] = useState("");
+  const [pending, setPending] = useState(false);
+  const [unavailable, setUnavailable] = useState<Unavailable>(null);
+  const notConfigured = unavailable !== null;
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Queries for real CRM context
-  const { data: companies = [] } = useCompanies();
-  const { data: contacts = [] } = useContacts();
-  const { data: activities = [] } = useActivities();
-  const { data: tasks = [] } = useTasks();
-  const { data: pipelines } = usePipelines();
-  const activePipelineId = pipelines?.[0]?.id;
-  const { data: stages = [] } = usePipelineStages(activePipelineId);
+  const requestRef = useRef<{ id: number; controller: AbortController | null }>({ id: 0, controller: null });
+  const launcherRef = useRef<HTMLButtonElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const logRef = useRef<HTMLDivElement>(null);
 
-  // Deals query (fallback if not passed via props)
-  const { data: queryDeals } = useQuery({
-    queryKey: ["copilot-deals", user?.id],
-    queryFn: async () => {
-      if (isDemoMode) return getDemoDeals();
-      const { data } = await supabase
-        .from("deals")
-        .select("*, companies(name), contacts(first_name, last_name)")
-        .order("value", { ascending: false });
-      return data || [];
-    },
-    enabled: !propDeals || propDeals.length === 0,
+  const orgId = organization?.id ?? null;
+  const currency = organization?.currency || "USD";
+  const contextKey = useMemo(() => ["ai-context", orgId] as const, [orgId]);
+
+  // Workspace snapshot: loaded when the panel opens (for suggestions) and reused at ask-time.
+  const contextQuery = useQuery({
+    queryKey: contextKey,
+    queryFn: fetchWorkspaceSnapshot,
+    enabled: open && !!orgId,
+    staleTime: CONTEXT_STALE_MS,
   });
+  const summary = useMemo(
+    () => (contextQuery.data ? summarizeWorkspace(contextQuery.data, currency, new Date()) : null),
+    [contextQuery.data, currency],
+  );
 
-  const effectiveDeals = useMemo(() => {
-    if (propDeals && propDeals.length > 0) return propDeals;
-    if (queryDeals && queryDeals.length > 0) return queryDeals;
-    if (isDemoMode) return getDemoDeals();
-    return [];
-  }, [propDeals, queryDeals, isDemoMode]);
-
-  const effectiveTotalValue = useMemo(() => {
-    if (propTotalValue && propTotalValue > 0) return propTotalValue;
-    return effectiveDeals.reduce((acc, d: any) => acc + (Number(d.value) || 0), 0);
-  }, [propTotalValue, effectiveDeals]);
-
-  // Company Name
-  const effectiveCompanyName = useMemo(() => {
-    if (isDemoMode) return "Goom Global";
-    return (
-      (user?.user_metadata?.company as string) ||
-      companies[0]?.name ||
-      "Goom Construction"
-    );
-  }, [isDemoMode, user, companies]);
-
-  // User Name
-  const userName = useMemo(() => {
-    if (isDemoMode) return "Alex";
-    return (
-      user?.user_metadata?.full_name?.split(" ")[0] ||
-      user?.email?.split("@")[0] ||
-      "there"
-    );
-  }, [user, isDemoMode]);
-
-  // Context Builder for Groq
-  const crmContext: CRMContextData = useMemo(() => {
-    return {
-      companyName: effectiveCompanyName,
-      userName: user?.user_metadata?.full_name || userName,
-      userRole: userRole || "Executive",
-      totalValue: effectiveTotalValue,
-      winRate: effectiveDeals.length > 0 ? 42 : 38,
-      deals: effectiveDeals.map((d: any) => ({
-        id: d.id,
-        title: d.title,
-        value: Number(d.value) || 0,
-        stage_name: d.stage_name || stages.find((s) => s.id === d.stage_id)?.name || "Active",
-        company_name: d.company_name || d.companies?.name || effectiveCompanyName,
-        contact_name:
-          d.contact_name ||
-          (d.contacts ? `${d.contacts.first_name} ${d.contacts.last_name || ""}`.trim() : undefined),
-        probability: d.probability || 50,
-        close_date: d.close_date,
-        notes: d.notes,
-      })),
-      contacts: (contacts.length > 0 ? contacts : (isDemoMode ? INITIAL_DEMO_CONTACTS : [])).map((c: any) => ({
-        id: c.id,
-        first_name: c.first_name,
-        last_name: c.last_name,
-        email: c.email,
-        phone: c.phone,
-        position: c.position,
-        company_name: c.company_name || c.companies?.name,
-        tags: c.tags,
-      })),
-      companies: (companies.length > 0 ? companies : (isDemoMode ? INITIAL_DEMO_COMPANIES : [])).map((c: any) => ({
-        id: c.id,
-        name: c.name,
-        industry: c.industry,
-        website: c.website,
-      })),
-      stages: stages.map((s) => ({
-        id: s.id,
-        name: s.name,
-        color: s.color,
-        count: effectiveDeals.filter((d: any) => d.stage_id === s.id).length,
-        value: effectiveDeals
-          .filter((d: any) => d.stage_id === s.id)
-          .reduce((sum: number, d: any) => sum + (Number(d.value) || 0), 0),
-      })),
-      activities: activities.map((a: any) => ({
-        title: a.title,
-        type: a.type,
-        description: a.description,
-        created_at: a.created_at,
-      })),
-      tasks: tasks.map((t: any) => ({
-        title: t.title,
-        due_date: t.due_date,
-        priority: t.priority,
-        completed: t.completed,
-      })),
-    };
-  }, [
-    effectiveCompanyName,
-    userName,
-    user,
-    userRole,
-    effectiveTotalValue,
-    effectiveDeals,
-    contacts,
-    companies,
-    stages,
-    activities,
-    tasks,
-    isDemoMode,
-  ]);
-
-  const initialGreeting = useMemo(() => {
-    if (effectiveDeals.length === 0) {
-      return `Hello ${userName}! I am your Goom AI Copilot, powered by Groq LPU™ intelligence. I'm connected to **${effectiveCompanyName}**. Your workspace is live and ready. Ask me anything about setting up deals, importing contacts, or organizing your pipeline!`;
-    }
-    return `Hello ${userName}! I am your Goom AI Copilot, powered by Groq LPU™ intelligence for **${effectiveCompanyName}**. I've audited your active **${formatCurrency(effectiveTotalValue)}** pipeline across **${effectiveDeals.length} opportunities**. What would you like to focus on today?`;
-  }, [userName, effectiveCompanyName, effectiveTotalValue, effectiveDeals.length]);
-
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: "m-0",
-      sender: "copilot",
-      content: initialGreeting,
-      time: "Just now",
-    },
-  ]);
-
-  // Keep initial greeting updated if company name resolves
+  // A different workspace means a different conversation.
   useEffect(() => {
-    setMessages((prev) => {
-      if (prev.length === 1 && prev[0].id === "m-0") {
-        return [
-          {
-            id: "m-0",
-            sender: "copilot",
-            content: initialGreeting,
-            time: "Just now",
-          },
-        ];
+    requestRef.current.controller?.abort();
+    requestRef.current = { id: requestRef.current.id + 1, controller: null };
+    setMessages([]);
+    setPending(false);
+    setUnavailable(null);
+  }, [orgId]);
+
+  // Keep the newest message in view.
+  useEffect(() => {
+    const el = logRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages, pending, open]);
+
+  // Focus the composer when opening.
+  useEffect(() => {
+    if (open) requestAnimationFrame(() => inputRef.current?.focus());
+  }, [open]);
+
+  // Abort anything in flight on unmount.
+  useEffect(() => () => requestRef.current.controller?.abort(), []);
+
+  const close = useCallback(() => {
+    setOpen(false);
+    requestAnimationFrame(() => launcherRef.current?.focus());
+  }, []);
+
+  const run = useCallback(
+    async (conversation: ChatItem[]) => {
+      requestRef.current.controller?.abort();
+      const controller = new AbortController();
+      const reqId = requestRef.current.id + 1;
+      requestRef.current = { id: reqId, controller };
+      const isCurrent = () => requestRef.current.id === reqId;
+
+      setMessages(conversation);
+      setPending(true);
+
+      const fail = (kind: ErrorKind, content: string) => {
+        if (!isCurrent()) return;
+        setMessages((prev) => [...prev, { id: nextId(), role: "assistant", content, error: kind }]);
+      };
+
+      try {
+        let snapshot;
+        try {
+          snapshot = await queryClient.fetchQuery({
+            queryKey: contextKey,
+            queryFn: fetchWorkspaceSnapshot,
+            staleTime: CONTEXT_STALE_MS,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          fail("generic", `Couldn't load your workspace data. ${sanitizeErrorMessage(msg)}`);
+          return;
+        }
+        if (!isCurrent()) return;
+
+        const today = new Date();
+        const system = buildAssistantSystemPrompt({
+          workspaceName: organization?.name,
+          userName: (user?.user_metadata?.full_name as string | undefined) || null,
+          userRole,
+          currency,
+          today: toIsoDate(today),
+          workspaceSummary: summarizeWorkspace(snapshot, currency, today).text,
+        });
+
+        const history: AiMessage[] = trimHistory(
+          conversation.filter((m) => !m.error).map((m) => ({ role: m.role, content: m.content })),
+        );
+
+        const answer = await chat([{ role: "system", content: system }, ...history], {
+          temperature: 0.3,
+          max_tokens: 900,
+          signal: controller.signal,
+        });
+        if (!isCurrent()) return;
+        setUnavailable(null);
+        setMessages((prev) => [...prev, { id: nextId(), role: "assistant", content: normalizeAiMarkdown(answer) }]);
+      } catch (err) {
+        if (!isCurrent()) return;
+        if (err instanceof AiAbortedError) fail("stopped", "Stopped.");
+        else if (err instanceof AiNotDeployedError) {
+          setUnavailable("not_deployed");
+          fail("not_deployed", "The assistant isn't available yet.");
+        } else if (err instanceof AiNotConfiguredError) {
+          setUnavailable("not_configured");
+          fail("not_configured", err.message);
+        } else if (err instanceof AiPlanLimitError) fail("plan_limit", err.message);
+        else if (err instanceof AiRateLimitError) fail("rate_limit", err.message);
+        else fail("generic", err instanceof Error ? err.message : "The assistant couldn't answer right now. Please try again.");
+      } finally {
+        if (isCurrent()) {
+          setPending(false);
+          requestRef.current.controller = null;
+        }
       }
-      return prev;
-    });
-  }, [initialGreeting]);
+    },
+    [queryClient, contextKey, organization?.name, user, userRole, currency],
+  );
 
-  // Scroll to bottom on new messages
+  const send = useCallback(
+    (text: string) => {
+      const q = text.trim();
+      if (!q || pending) return;
+      setInput("");
+      void run([...messages, { id: nextId(), role: "user", content: q }]);
+    },
+    [messages, pending, run],
+  );
+
+  const stop = useCallback(() => {
+    const { controller } = requestRef.current;
+    // Invalidate the request first so a late response is ignored even if abort isn't honoured.
+    requestRef.current = { id: requestRef.current.id + 1, controller: null };
+    controller?.abort();
+    setPending(false);
+    setMessages((prev) => [...prev, { id: nextId(), role: "assistant", content: "Stopped.", error: "stopped" }]);
+    inputRef.current?.focus();
+  }, []);
+
+  const retry = useCallback(
+    (errorId: string) => {
+      const idx = messages.findIndex((m) => m.id === errorId);
+      if (idx <= 0 || pending) return;
+      void run(messages.slice(0, idx));
+    },
+    [messages, pending, run],
+  );
+
+  const clear = useCallback(() => {
+    requestRef.current.controller?.abort();
+    requestRef.current = { id: requestRef.current.id + 1, controller: null };
+    setMessages([]);
+    setPending(false);
+    setInput("");
+    inputRef.current?.focus();
+  }, []);
+
+  const copy = useCallback(
+    async (item: ChatItem) => {
+      try {
+        await navigator.clipboard.writeText(item.content);
+        setCopiedId(item.id);
+        window.setTimeout(() => setCopiedId((c) => (c === item.id ? null : c)), 2000);
+      } catch {
+        toast({ title: "Couldn't copy", description: "Your browser blocked clipboard access.", variant: "destructive" });
+      }
+    },
+    [toast],
+  );
+
+  // Other parts of the app can open the assistant (optionally with a question).
+  const sendRef = useRef(send);
+  sendRef.current = send;
   useEffect(() => {
-    if (isOpen && activeTab === "chat") {
-      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    }
-  }, [messages, isOpen, activeTab, isThinking]);
-
-  // Proactive Signals Radar
-  const signals = useMemo(() => {
-    if (effectiveDeals.length === 0) {
-      return [
-        {
-          id: 1,
-          type: "opportunity",
-          tag: "Setup",
-          title: "Create Initial Deal",
-          desc: `Add your first sales contract to ${effectiveCompanyName} to activate predictive AI forecasting.`,
-          actionLabel: "How to add deals",
-          prompt: `How should I structure opportunities for ${effectiveCompanyName}?`,
-        },
-        {
-          id: 2,
-          type: "forecast",
-          tag: "Imports",
-          title: "Import Account Database",
-          desc: "Upload CSV contacts or contractor records to sync real-time communications.",
-          actionLabel: "Data Import Guide",
-          prompt: "What is the fastest way to import company contacts into Goom CRM?",
-        },
-      ];
-    }
-
-    const sorted = [...effectiveDeals].sort((a: any, b: any) => (Number(b.value) || 0) - (Number(a.value) || 0));
-    const topDeal = sorted[0];
-    const secondDeal = sorted[1] || sorted[0];
-
-    return [
-      {
-        id: 1,
-        type: "risk",
-        tag: "High Value Priority",
-        title: `${topDeal.title} (${formatCurrency(Number(topDeal.value) || 0)})`,
-        desc: `Top opportunity in ${effectiveCompanyName}'s pipeline. Needs executive alignment to expedite signature.`,
-        actionLabel: "Audit Deal Risks",
-        prompt: `Audit ${topDeal.title} (${formatCurrency(Number(topDeal.value) || 0)}). What are the key risks and next steps?`,
-      },
-      {
-        id: 2,
-        type: "opportunity",
-        tag: "Executive Draft",
-        title: `Follow-up on ${secondDeal.title}`,
-        desc: "Prepare an executive check-in note to accelerate timeline and confirm milestones.",
-        actionLabel: "Draft Email",
-        prompt: `Draft a high-priority follow-up email for ${secondDeal.title} for ${effectiveCompanyName}.`,
-      },
-      {
-        id: 3,
-        type: "forecast",
-        tag: "Pacing Model",
-        title: `${effectiveCompanyName} Revenue Pacing`,
-        desc: `${formatCurrency(effectiveTotalValue)} active across ${effectiveDeals.length} projects.`,
-        actionLabel: "Quarterly Forecast",
-        prompt: `Provide an executive revenue forecast and closing schedule for ${effectiveCompanyName}'s ${effectiveDeals.length} active deals.`,
-      },
-    ];
-  }, [effectiveDeals, effectiveCompanyName, effectiveTotalValue]);
-
-  // Contextual Quick Prompts
-  const quickPrompts = useMemo(() => {
-    if (effectiveDeals.length === 0) {
-      return [
-        "💡 Getting started guide",
-        "📊 Best pipeline stages",
-        "📥 How to import CSV",
-        "🏗️ Construction CRM tips",
-      ];
-    }
-
-    const topTitle = effectiveDeals[0]?.title || "our top deal";
-    return [
-      `🏗️ ${effectiveCompanyName} overview`,
-      `📑 Audit: ${topTitle.length > 22 ? topTitle.slice(0, 20) + "..." : topTitle}`,
-      "✉️ Draft closing follow-up",
-      "🚨 Stalled deals audit",
-      "📈 Revenue forecast model",
-    ];
-  }, [effectiveCompanyName, effectiveDeals]);
-
-  const handleSendMessage = async (textToSend: string) => {
-    if (!textToSend.trim() || isThinking) return;
-    setActiveTab("chat");
-
-    const userMsg: Message = {
-      id: `m-${Date.now()}`,
-      sender: "user",
-      content: textToSend,
-      time: "Just now",
+    const onOpen = (e: Event) => {
+      const prompt = (e as CustomEvent<{ prompt?: string }>).detail?.prompt;
+      setOpen(true);
+      if (prompt) window.setTimeout(() => sendRef.current(prompt), 0);
     };
+    window.addEventListener(OPEN_ASSISTANT_EVENT, onOpen);
+    return () => window.removeEventListener(OPEN_ASSISTANT_EVENT, onOpen);
+  }, []);
 
-    const updatedMessages = [...messages, userMsg];
-    setMessages(updatedMessages);
-    setInputQuery("");
-    setIsThinking(true);
+  const suggestions = useMemo(() => {
+    const list = ["Summarize my pipeline", "Which deals are at risk?", "What should I focus on today?"];
+    if (summary?.followUpDeal) list.push(`Draft a follow-up email for "${summary.followUpDeal.title}"`);
+    return list;
+  }, [summary]);
 
-    try {
-      const groqHistory = updatedMessages.map((m) => ({
-        role: m.sender,
-        content: m.content,
-      }));
-
-      const res: CopilotResponse = await askGroqCopilot(groqHistory, textToSend, crmContext);
-
-      const botMsg: Message = {
-        id: `m-bot-${Date.now()}`,
-        sender: "copilot",
-        content: res.content,
-        time: "Just now",
-        actionPayload: res.actionPayload,
-      };
-
-      setMessages((prev) => [...prev, botMsg]);
-    } catch (err: any) {
-      console.error("Copilot error:", err);
-      const errorMsg: Message = {
-        id: `m-bot-err-${Date.now()}`,
-        sender: "copilot",
-        content: `I ran into an issue connecting to Groq AI: ${err?.message || "Please check network connectivity."}\n\nHere is a quick summary based on your live CRM data:\n• Active Deals: ${effectiveDeals.length}\n• Total Pipeline: ${formatCurrency(effectiveTotalValue)}`,
-        time: "Just now",
-      };
-      setMessages((prev) => [...prev, errorMsg]);
-    } finally {
-      setIsThinking(false);
+  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+      e.preventDefault();
+      send(input);
     }
   };
 
-  const handleCopy = (text?: string, id?: string) => {
-    if (!text) return;
-    navigator.clipboard.writeText(text);
-    if (id) {
-      setCopiedId(id);
-      setTimeout(() => setCopiedId(null), 2500);
-    }
-    toast({
-      title: "Copied to clipboard! 📋",
-      description: "Ready to paste into your email client or document.",
-    });
-  };
+  // Auto-grow the composer up to a max height.
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+  }, [input, open]);
+
+  if (!user) return null;
+
+  if (!open) {
+    return (
+      <Button
+        ref={launcherRef}
+        type="button"
+        onClick={() => setOpen(true)}
+        aria-label="Open AI assistant"
+        aria-haspopup="dialog"
+        className="fixed bottom-4 right-4 z-40 h-11 w-11 rounded-full p-0 shadow-lg sm:bottom-6 sm:right-6 sm:h-10 sm:w-auto sm:px-4 sm:gap-2 print:hidden"
+      >
+        <Sparkles className="h-4 w-4" aria-hidden="true" />
+        <span className="hidden text-sm font-medium sm:inline">Ask AI</span>
+      </Button>
+    );
+  }
+
+  const empty = messages.length === 0;
 
   return (
-    <>
-      {/* Floating Trigger Button (Bottom Right) */}
-      <div className="fixed bottom-6 right-6 z-40 flex items-center gap-2">
-        <Button
-          onClick={() => setIsOpen(!isOpen)}
-          className="h-11 rounded-full bg-foreground text-background hover:bg-foreground/90 px-4 shadow-2xl flex items-center gap-2.5 font-medium border border-border group transition-all"
-        >
-          <div className="relative">
-            <Sparkles className="h-4 w-4 text-primary animate-pulse" />
-            <span className="absolute -top-1 -right-1 flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
-            </span>
+    <section
+      role="dialog"
+      aria-label="AI assistant"
+      aria-modal="false"
+      onKeyDown={(e) => {
+        if (e.key === "Escape") {
+          e.stopPropagation();
+          close();
+        }
+      }}
+      className={cn(
+        "fixed z-50 flex flex-col overflow-hidden rounded-xl border bg-card text-card-foreground shadow-xl",
+        "inset-x-2 bottom-2 top-16 sm:inset-x-auto sm:top-auto sm:bottom-6 sm:right-6 sm:w-[420px] sm:h-[min(640px,calc(100vh-6rem))]",
+        "motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 motion-safe:duration-200",
+      )}
+    >
+      {/* Header */}
+      <header className="flex items-center justify-between gap-2 border-b px-4 py-3">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+            <Sparkles className="h-4 w-4" aria-hidden="true" />
           </div>
-          <span className="text-xs font-semibold">Goom Copilot</span>
-          <Badge
-            variant="outline"
-            className="text-[9px] px-1.5 py-0 bg-background text-foreground border-border font-mono font-bold"
-          >
-            Groq AI
-          </Badge>
-        </Button>
-      </div>
-
-      {/* Slide-Up / Floating Panel Window */}
-      {isOpen && (
-        <div className="fixed bottom-20 right-6 z-50 w-[450px] max-w-[calc(100vw-2rem)] rounded-2xl border border-border bg-card shadow-2xl overflow-hidden flex flex-col h-[620px] max-h-[86vh] animate-in fade-in slide-in-from-bottom-4 duration-200">
-          {/* Header */}
-          <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-secondary/40">
-            <div className="flex items-center gap-2.5">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-foreground text-background shadow-xs">
-                <Bot className="h-4 w-4" />
-              </div>
-              <div>
-                <div className="flex items-center gap-1.5">
-                  <h3 className="text-xs font-bold text-foreground">Goom AI Copilot</h3>
-                  <Badge
-                    variant="outline"
-                    className="text-[9px] px-1.5 py-0 border-emerald-500/30 text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 font-medium"
-                  >
-                    Groq LPU™ Active
-                  </Badge>
-                </div>
-                <p className="text-[10px] text-muted-foreground flex items-center gap-1">
-                  <Building2 className="h-2.5 w-2.5 inline" />
-                  <span>{effectiveCompanyName}</span>
-                  <span>•</span>
-                  <span>{effectiveDeals.length} Deals ({formatCurrency(effectiveTotalValue)})</span>
-                </p>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-1">
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-7 w-7 text-muted-foreground hover:text-foreground"
-                onClick={() => {
-                  setMessages([
-                    {
-                      id: `m-${Date.now()}`,
-                      sender: "copilot",
-                      content: initialGreeting,
-                      time: "Just now",
-                    },
-                  ]);
-                }}
-                title="Reset conversation"
-              >
-                <RefreshCw className="h-3.5 w-3.5" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-7 w-7 text-muted-foreground hover:text-foreground"
-                onClick={() => setIsOpen(false)}
-              >
-                <X className="h-4 w-4" />
-              </Button>
-            </div>
-          </div>
-
-          {/* Subheader Switcher */}
-          <div className="flex items-center border-b border-border bg-secondary/15 px-4 py-1.5 gap-2 text-xs">
-            <button
-              onClick={() => setActiveTab("chat")}
-              className={`px-3 py-1 rounded-md text-[11px] font-medium transition-all ${
-                activeTab === "chat"
-                  ? "bg-foreground text-background font-semibold shadow-xs"
-                  : "text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              Live Copilot Chat
-            </button>
-            <button
-              onClick={() => setActiveTab("signals")}
-              className={`px-3 py-1 rounded-md text-[11px] font-medium transition-all ${
-                activeTab === "signals"
-                  ? "bg-foreground text-background font-semibold shadow-xs"
-                  : "text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              Proactive Radar ({signals.length})
-            </button>
-          </div>
-
-          {/* Tab 1: Signals View */}
-          {activeTab === "signals" && (
-            <div className="flex-1 overflow-y-auto p-4 space-y-3">
-              <div className="flex items-center justify-between pb-1">
-                <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Proactive Telemetry
-                </span>
-                <span className="text-[10px] text-muted-foreground">Real-time DB Sync</span>
-              </div>
-
-              {signals.map((sig) => (
-                <div
-                  key={sig.id}
-                  className="rounded-xl border border-border bg-secondary/20 p-3.5 space-y-2 hover:border-foreground/30 transition-all"
-                >
-                  <div className="flex items-center justify-between">
-                    <Badge
-                      variant="outline"
-                      className={`text-[9px] px-1.5 py-0 font-semibold uppercase ${
-                        sig.type === "risk"
-                          ? "border-amber-500/40 text-amber-600 dark:text-amber-400 bg-amber-500/10"
-                          : sig.type === "opportunity"
-                          ? "border-emerald-500/40 text-emerald-600 dark:text-emerald-400 bg-emerald-500/10"
-                          : "border-blue-500/40 text-blue-600 dark:text-blue-400 bg-blue-500/10"
-                      }`}
-                    >
-                      {sig.tag}
-                    </Badge>
-                  </div>
-
-                  <div>
-                    <h4 className="text-xs font-semibold text-foreground">{sig.title}</h4>
-                    <p className="text-[11px] text-muted-foreground mt-0.5 leading-normal">{sig.desc}</p>
-                  </div>
-
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => handleSendMessage(sig.prompt)}
-                    className="w-full h-7 text-[11px] border-border hover:bg-secondary font-medium gap-1 justify-between"
-                  >
-                    <span>{sig.actionLabel}</span>
-                    <ArrowRight className="h-3 w-3 text-muted-foreground" />
-                  </Button>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Tab 2: Chat View */}
-          {activeTab === "chat" && (
-            <div className="flex-1 overflow-y-auto p-4 space-y-3">
-              {messages.map((m) => (
-                <div
-                  key={m.id}
-                  className={`flex flex-col ${m.sender === "user" ? "items-end" : "items-start"}`}
-                >
-                  <div
-                    className={`max-w-[90%] rounded-xl p-3 text-xs leading-relaxed shadow-xs ${
-                      m.sender === "user"
-                        ? "bg-foreground text-background font-medium whitespace-pre-line"
-                        : "bg-secondary/40 border border-border text-foreground"
-                    }`}
-                  >
-                    {m.sender === "user" ? (
-                      m.content
-                    ) : (
-                      <FormattedAiText text={m.content} />
-                    )}
-
-                    {m.actionPayload && (
-                      <div className="mt-3 pt-2.5 border-t border-border flex justify-end">
-                        <Button
-                          size="sm"
-                          onClick={() => handleCopy(m.actionPayload?.textToCopy, m.id)}
-                          className="h-7 text-[10px] gap-1.5 bg-foreground text-background hover:bg-foreground/90 font-medium shadow-xs"
-                        >
-                          {copiedId === m.id ? (
-                            <>
-                              <Check className="h-3 w-3 text-emerald-400" />
-                              <span>Copied!</span>
-                            </>
-                          ) : (
-                            <>
-                              <Copy className="h-3 w-3" />
-                              <span>{m.actionPayload.label}</span>
-                            </>
-                          )}
-                        </Button>
-                      </div>
-                    )}
-                  </div>
-                  <span className="text-[9px] text-muted-foreground mt-1 px-1">{m.time}</span>
-                </div>
-              ))}
-
-              {isThinking && (
-                <div className="flex items-center gap-2 p-2.5 rounded-xl border border-border bg-secondary/30 text-xs text-muted-foreground w-fit animate-pulse">
-                  <Sparkles className="h-3.5 w-3.5 animate-spin text-foreground" />
-                  <span>Groq AI is reasoning over {effectiveCompanyName} data...</span>
-                </div>
-              )}
-
-              <div ref={messagesEndRef} />
-            </div>
-          )}
-
-          {/* Quick Prompts Strip */}
-          <div className="px-3 py-2 border-t border-border/80 bg-secondary/20 flex gap-1.5 overflow-x-auto no-scrollbar shrink-0">
-            {quickPrompts.map((qp, idx) => (
-              <button
-                key={idx}
-                onClick={() => handleSendMessage(qp)}
-                className="whitespace-nowrap rounded-md border border-border bg-card px-2.5 py-1 text-[10px] text-muted-foreground hover:text-foreground hover:bg-secondary transition-all shrink-0 font-medium"
-              >
-                {qp}
-              </button>
-            ))}
-          </div>
-
-          {/* Chat Input Footer */}
-          <div className="p-3 border-t border-border bg-card shrink-0">
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                handleSendMessage(inputQuery);
-              }}
-              className="flex items-center gap-2"
-            >
-              <Input
-                value={inputQuery}
-                onChange={(e) => setInputQuery(e.target.value)}
-                placeholder={`Ask Copilot about ${effectiveCompanyName}, deals, drafting...`}
-                className="h-9 text-xs border-border bg-secondary/20"
-                disabled={isThinking}
-              />
-              <Button
-                type="submit"
-                size="sm"
-                disabled={!inputQuery.trim() || isThinking}
-                className="h-9 w-9 p-0 bg-foreground text-background hover:bg-foreground/90 shrink-0 shadow-xs"
-              >
-                <Send className="h-3.5 w-3.5" />
-              </Button>
-            </form>
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold leading-tight">Assistant</h2>
+            <p className="truncate text-xs text-muted-foreground">
+              {organization?.name ? `Answers from ${organization.name}` : "Answers from your workspace"}
+            </p>
           </div>
         </div>
-      )}
-    </>
+        <div className="flex items-center gap-0.5">
+          <IconButton label="Clear conversation" onClick={clear} disabled={empty && !pending}>
+            <Trash2 className="h-4 w-4" />
+          </IconButton>
+          <IconButton label="Close (Esc)" onClick={close}>
+            <X className="h-4 w-4" />
+          </IconButton>
+        </div>
+      </header>
+
+      {/* Conversation */}
+      <div ref={logRef} role="log" aria-live="polite" aria-busy={pending} className="flex-1 space-y-4 overflow-y-auto px-4 py-4">
+        {notConfigured && empty ? null : empty ? (
+          <div className="space-y-4">
+            <div className="space-y-1">
+              <p className="text-sm font-medium">How can I help?</p>
+              <p className="text-xs text-muted-foreground">
+                I read your current deals, tasks and recent activity when you ask, and answer from that data only.
+              </p>
+            </div>
+            {contextQuery.isLoading ? (
+              <div className="space-y-2" aria-hidden="true">
+                {[0, 1, 2].map((i) => (
+                  <div key={i} className="h-9 rounded-lg bg-muted motion-safe:animate-pulse" />
+                ))}
+              </div>
+            ) : (
+              <>
+                {summary?.isEmpty && (
+                  <p className="rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
+                    Your workspace doesn't have any deals, tasks or activities yet, so answers will be limited.
+                  </p>
+                )}
+                <ul className="space-y-2" aria-label="Suggested questions">
+                  {suggestions.map((s) => (
+                    <li key={s}>
+                      <button
+                        type="button"
+                        onClick={() => send(s)}
+                        className="w-full rounded-lg border bg-background px-3 py-2 text-left text-sm transition-colors duration-150 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        <span className="line-clamp-2">{s}</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </div>
+        ) : (
+          messages.map((m) =>
+            m.role === "user" ? (
+              <div key={m.id} className="flex justify-end">
+                <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-xl rounded-br-sm bg-primary px-3 py-2 text-sm text-primary-foreground">
+                  {m.content}
+                </div>
+              </div>
+            ) : m.error ? (
+              <div
+                key={m.id}
+                className={cn(
+                  "flex items-start gap-2 rounded-lg border px-3 py-2 text-sm",
+                  m.error === "stopped" ? "border-dashed text-muted-foreground" : "border-destructive/30 bg-destructive/5",
+                )}
+              >
+                {m.error !== "stopped" && <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" aria-hidden="true" />}
+                <div className="min-w-0 flex-1">
+                  <p>{m.content}</p>
+                  {m.error === "plan_limit" && canBill && (
+                    <Button asChild variant="link" size="sm" className="h-auto px-0 py-1 text-xs">
+                      <Link to="/settings?tab=billing" onClick={() => setOpen(false)}>
+                        View plan
+                      </Link>
+                    </Button>
+                  )}
+                  {m.error === "plan_limit" && !canBill && (
+                    <p className="mt-1 text-xs text-muted-foreground">Ask your workspace admin about upgrading the plan.</p>
+                  )}
+                  {m.error !== "not_configured" && m.error !== "not_deployed" && m.error !== "plan_limit" && (
+                    <Button
+                      type="button"
+                      variant="link"
+                      size="sm"
+                      className="h-auto px-0 py-1 text-xs"
+                      onClick={() => retry(m.id)}
+                      disabled={pending}
+                    >
+                      <RotateCcw className="mr-1 h-3 w-3" aria-hidden="true" />
+                      Try again
+                    </Button>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div key={m.id} className="group space-y-1">
+                <MarkdownView value={m.content} className="text-sm leading-relaxed text-foreground break-words" />
+                <div className="flex items-center gap-1 opacity-100 transition-opacity duration-150 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-within:opacity-100">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground"
+                    onClick={() => void copy(m)}
+                    aria-label={/^\s*\**subject:/im.test(m.content) ? "Copy email draft" : "Copy answer"}
+                  >
+                    {copiedId === m.id ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                    {copiedId === m.id ? "Copied" : "Copy"}
+                  </Button>
+                </div>
+              </div>
+            ),
+          )
+        )}
+
+        {notConfigured && (
+          <div className="rounded-lg border bg-muted/40 px-3 py-3 text-sm">
+            <p className="font-medium">
+              {unavailable === "not_deployed" ? "The AI service isn't deployed yet" : "AI isn't set up for this workspace yet"}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {!(isAdmin || isPlatformAdmin)
+                ? "Ask your workspace admin to enable the AI assistant. Everything else in the CRM works as usual."
+                : unavailable === "not_deployed"
+                  ? "The ai-chat edge function hasn't been deployed to this Supabase project. See supabase/README.md → Edge functions, then try again."
+                  : "The assistant needs a server-side AI provider key. Whoever deploys this app should set the GROQ_API_KEY secret for the ai-chat edge function, then try again."}
+            </p>
+          </div>
+        )}
+
+        {pending && (
+          <div className="flex items-center gap-2 text-xs text-muted-foreground" role="status">
+            <Loader2 className="h-3.5 w-3.5 motion-safe:animate-spin" aria-hidden="true" />
+            Thinking…
+          </div>
+        )}
+      </div>
+
+      {/* Composer */}
+      <form
+        className="border-t p-3"
+        onSubmit={(e) => {
+          e.preventDefault();
+          send(input);
+        }}
+      >
+        <div className="flex items-end gap-2 rounded-lg border bg-background px-2 py-1.5 focus-within:ring-2 focus-within:ring-ring">
+          <label htmlFor="ai-assistant-input" className="sr-only">
+            Ask the assistant
+          </label>
+          <textarea
+            id="ai-assistant-input"
+            ref={inputRef}
+            rows={1}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={onKeyDown}
+            placeholder="Ask about your deals, tasks or pipeline…"
+            maxLength={4000}
+            className="max-h-40 min-h-[36px] flex-1 resize-none bg-transparent px-1 py-2 text-sm placeholder:text-muted-foreground focus:outline-none"
+          />
+          {pending ? (
+            <Button type="button" size="icon" variant="outline" className="h-8 w-8 shrink-0" onClick={stop} aria-label="Stop generating">
+              <Square className="h-3.5 w-3.5 fill-current" />
+            </Button>
+          ) : (
+            <Button type="submit" size="icon" className="h-8 w-8 shrink-0" disabled={!input.trim()} aria-label="Send">
+              <ArrowUp className="h-4 w-4" />
+            </Button>
+          )}
+        </div>
+        <p className="mt-1.5 px-1 text-xs text-muted-foreground">
+          Enter to send · Shift+Enter for a new line · Answers can be wrong — check before acting.
+        </p>
+      </form>
+    </section>
   );
 }
+
+export default FloatingAiCopilot;

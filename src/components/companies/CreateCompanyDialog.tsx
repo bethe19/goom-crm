@@ -1,64 +1,88 @@
-import { useState } from "react";
+import { useEffect } from "react";
+import { useNavigate } from "react-router-dom";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { toast } from "sonner";
+import { AlertTriangle, Loader2 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
-import { useCreateCompany } from "@/hooks/useCompanies";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { useCreateCompany, useDuplicateCompanyName, type Company } from "@/hooks/useCompanies";
+import { useDebounce } from "@/hooks/useDebounce";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { useToast } from "@/hooks/use-toast";
-import { Plus } from "lucide-react";
+import { errorMessage } from "@/components/settings/validation";
+import { CompanyFormFields } from "@/components/companies/CompanyFormFields";
+import { companyFormSchema, emptyCompanyForm, toCompanyPayload, type CompanyFormValues } from "@/components/companies/companyForm";
 
-export function CreateCompanyDialog() {
+interface CreateCompanyDialogProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onCreated?: (company: Company) => void;
+  /** Called instead of navigating when the user chooses to open an existing duplicate. */
+  onOpenExisting?: (companyId: string) => void;
+}
+
+export function CreateCompanyDialog({ open, onOpenChange, onCreated, onOpenExisting }: CreateCompanyDialogProps) {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const createCompany = useCreateCompany();
-  const { toast } = useToast();
-  const [open, setOpen] = useState(false);
-  const [name, setName] = useState("");
-  const [industry, setIndustry] = useState("");
-  const [website, setWebsite] = useState("");
+  const form = useForm<CompanyFormValues>({ resolver: zodResolver(companyFormSchema), defaultValues: emptyCompanyForm });
+  const { handleSubmit, reset, watch, formState } = form;
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!user || !name.trim()) return;
-    createCompany.mutate(
-      { name: name.trim(), industry: industry || null, website: website || null, created_by: user.id },
-      {
-        onSuccess: () => {
-          toast({ title: "Company created" });
-          setOpen(false);
-          setName("");
-          setIndustry("");
-          setWebsite("");
-        },
-      }
-    );
+  useEffect(() => {
+    if (open) reset(emptyCompanyForm);
+  }, [open, reset]);
+
+  const name = useDebounce(watch("name") ?? "", 400);
+  const { data: duplicate } = useDuplicateCompanyName(open ? name : "");
+
+  const openExisting = (id: string) => {
+    onOpenChange(false);
+    if (onOpenExisting) onOpenExisting(id);
+    else navigate(`/companies?open=${id}`);
   };
 
+  const onSubmit = async (values: CompanyFormValues) => {
+    try {
+      const company = await createCompany.mutateAsync({ ...toCompanyPayload(values), ...(user ? { created_by: user.id } : {}) });
+      toast.success("Company created", { description: company.name });
+      onCreated?.(company);
+      onOpenChange(false);
+    } catch (err) {
+      toast.error("Couldn't create company", { description: errorMessage(err) });
+    }
+  };
+
+  const pending = formState.isSubmitting;
+
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button><Plus className="h-4 w-4 mr-1" /> Add Company</Button>
-      </DialogTrigger>
-      <DialogContent>
+    <Dialog open={open} onOpenChange={(o) => !pending && onOpenChange(o)}>
+      <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>New Company</DialogTitle>
+          <DialogTitle>New company</DialogTitle>
+          <DialogDescription>Add an account you sell to or partner with.</DialogDescription>
         </DialogHeader>
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="space-y-2">
-            <Label>Name *</Label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} required maxLength={200} />
-          </div>
-          <div className="space-y-2">
-            <Label>Industry</Label>
-            <Input value={industry} onChange={(e) => setIndustry(e.target.value)} maxLength={100} />
-          </div>
-          <div className="space-y-2">
-            <Label>Website</Label>
-            <Input value={website} onChange={(e) => setWebsite(e.target.value)} placeholder="https://..." maxLength={500} />
-          </div>
-          <Button type="submit" disabled={createCompany.isPending} className="w-full">
-            Create Company
-          </Button>
+        <form onSubmit={handleSubmit(onSubmit)} className="space-y-4" noValidate>
+          <CompanyFormFields form={form} idPrefix="new-company" autoFocus />
+          {duplicate && (
+            <div role="status" className="flex items-start gap-2 rounded-lg border border-warning/30 bg-warning/10 p-3 text-sm">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" aria-hidden />
+              <div>
+                <p>A company named “{duplicate.name}” already exists.</p>
+                <Button type="button" variant="link" className="h-auto p-0 text-sm" onClick={() => openExisting(duplicate.id)}>
+                  Open it
+                </Button>
+              </div>
+            </div>
+          )}
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={pending}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={pending}>
+              {pending && <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />}
+              {pending ? "Creating…" : duplicate ? "Create anyway" : "Create company"}
+            </Button>
+          </DialogFooter>
         </form>
       </DialogContent>
     </Dialog>

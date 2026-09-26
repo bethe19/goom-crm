@@ -1,20 +1,17 @@
-import { useState, useEffect } from "react";
-import { Task, useUpdateTask, useDeleteTask } from "@/hooks/useTasks";
-import { useContacts } from "@/hooks/useContacts";
-import { useQuery } from "@tanstack/react-query";
-import { supabase } from "@/integrations/supabase/client";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { useEffect } from "react";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { format } from "date-fns";
+import { CheckCircle2, Circle, Loader2, Trash2 } from "lucide-react";
+import { useDeleteTask, useToggleTask, useUpdateTask, type Task } from "@/hooks/useTasks";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
-import { Badge } from "@/components/ui/badge";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
-import { Separator } from "@/components/ui/separator";
+import { useConfirm } from "@/components/common/ConfirmDialog";
 import { useToast } from "@/hooks/use-toast";
-import { Pencil, X, Save, Trash2, Calendar, Clock, LinkIcon } from "lucide-react";
-import { format, parseISO } from "date-fns";
+import { errorMessage } from "@/components/settings/validation";
+import { memberName, useWorkspaceMembers } from "@/components/pipeline/useWorkspaceMembers";
+import { TaskFormFields } from "./TaskFormFields";
+import { dueDateToIso, isoToDueInputs, taskFormSchema, type TaskFormValues } from "./taskUtils";
 
 interface TaskDetailDialogProps {
   task: Task | null;
@@ -22,219 +19,133 @@ interface TaskDetailDialogProps {
   onOpenChange: (open: boolean) => void;
 }
 
-const priorityColors: Record<string, string> = {
-  high: "bg-destructive/10 text-destructive border-destructive/20",
-  medium: "bg-orange-500/10 text-orange-600 border-orange-500/20",
-  low: "bg-muted text-muted-foreground border-border",
-};
+function toForm(task: Task): TaskFormValues {
+  const { date, time } = isoToDueInputs(task.due_date);
+  return {
+    title: task.title,
+    description: task.description ?? "",
+    due_date: date,
+    due_time: time,
+    priority: (["high", "medium", "low"].includes(task.priority) ? task.priority : "medium") as TaskFormValues["priority"],
+    assigned_to: task.assigned_to ?? task.user_id ?? null,
+    deal_id: task.deal_id,
+    contact_id: task.contact_id,
+  };
+}
 
+/** Edit a task: all fields, complete/reopen, delete (confirmed). */
 export function TaskDetailDialog({ task, open, onOpenChange }: TaskDetailDialogProps) {
+  const { toast } = useToast();
+  const confirm = useConfirm();
   const updateTask = useUpdateTask();
   const deleteTask = useDeleteTask();
-  const { toast } = useToast();
-  const { data: contacts } = useContacts();
-  const { data: deals } = useQuery({
-    queryKey: ["all-deals-for-picker"],
-    queryFn: async () => {
-      const { data, error } = await supabase.from("deals").select("id, title").order("title");
-      if (error) throw error;
-      return data;
-    },
-  });
-
-  const [editing, setEditing] = useState(false);
-  const [editTitle, setEditTitle] = useState("");
-  const [editDescription, setEditDescription] = useState("");
-  const [editDueDate, setEditDueDate] = useState("");
-  const [editPriority, setEditPriority] = useState("medium");
-  const [editDealId, setEditDealId] = useState("");
-  const [editContactId, setEditContactId] = useState("");
+  const toggle = useToggleTask();
+  const { byId } = useWorkspaceMembers();
+  const form = useForm<TaskFormValues>({ resolver: zodResolver(taskFormSchema) });
 
   useEffect(() => {
-    if (task && editing) {
-      setEditTitle(task.title);
-      setEditDescription(task.description || "");
-      setEditDueDate(task.due_date ? task.due_date.slice(0, 16) : "");
-      setEditPriority(task.priority);
-      setEditDealId(task.deal_id || "none");
-      setEditContactId(task.contact_id || "none");
-    }
-  }, [task, editing]);
+    if (task && open) form.reset(toForm(task));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [task?.id, open]);
 
   if (!task) return null;
+  const creator = task.user_id ? byId.get(task.user_id) : undefined;
 
-  const handleSave = () => {
+  const onSubmit = (v: TaskFormValues) => {
     updateTask.mutate(
       {
         id: task.id,
-        title: editTitle,
-        description: editDescription || null,
-        due_date: editDueDate || null,
-        priority: editPriority,
-        deal_id: editDealId && editDealId !== "none" ? editDealId : null,
-        contact_id: editContactId && editContactId !== "none" ? editContactId : null,
+        title: v.title.trim(),
+        description: v.description.trim() || null,
+        due_date: dueDateToIso(v.due_date, v.due_time),
+        priority: v.priority,
+        assigned_to: v.assigned_to,
+        deal_id: v.deal_id,
+        contact_id: v.contact_id,
       },
       {
         onSuccess: () => {
-          toast({ title: "Task updated" });
-          setEditing(false);
+          toast({ title: "Task updated", variant: "success" });
           onOpenChange(false);
         },
-      }
+        onError: (err) => toast({ title: "Couldn't save task", description: errorMessage(err), variant: "destructive" }),
+      },
     );
   };
 
-  const handleDelete = () => {
+  const handleToggle = () => {
+    const completed = !task.completed;
+    toggle.mutate(
+      { id: task.id, completed },
+      {
+        onSuccess: () => {
+          toast({
+            title: completed ? "Task completed" : "Task reopened",
+            description: task.title,
+            action: { label: "Undo", onClick: () => toggle.mutate({ id: task.id, completed: !completed }) },
+          });
+          if (completed) onOpenChange(false);
+        },
+        onError: (err) => toast({ title: "Couldn't update task", description: errorMessage(err), variant: "destructive" }),
+      },
+    );
+  };
+
+  const handleDelete = async () => {
+    if (!(await confirm({ title: "Delete this task?", description: `“${task.title}” will be permanently deleted.`, confirmLabel: "Delete" }))) return;
     deleteTask.mutate(task.id, {
       onSuccess: () => {
-        toast({ title: "Task deleted" });
+        toast({ title: "Task deleted", variant: "success" });
         onOpenChange(false);
       },
+      onError: (err) => toast({ title: "Couldn't delete task", description: errorMessage(err), variant: "destructive" }),
     });
   };
 
+  const pending = updateTask.isPending || deleteTask.isPending;
+
   return (
-    <Dialog open={open} onOpenChange={(o) => { if (!o) setEditing(false); onOpenChange(o); }}>
-      <DialogContent className="sm:max-w-md p-0">
-        {/* Toolbar */}
-        <div className="flex items-center justify-between border-b px-6 py-3">
-          <DialogTitle className="text-lg font-semibold truncate">{task.title}</DialogTitle>
-          <div className="flex items-center gap-1">
-            <Button variant="ghost" size="icon" onClick={() => setEditing(!editing)} title={editing ? "Cancel editing" : "Edit"}>
-              {editing ? <X className="h-4 w-4" /> : <Pencil className="h-4 w-4" />}
+    <Dialog open={open} onOpenChange={(o) => !pending && onOpenChange(o)}>
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Edit task</DialogTitle>
+          <DialogDescription>
+            Created {format(new Date(task.created_at), "MMM d, yyyy")}
+            {creator ? ` by ${memberName(creator)}` : ""} · Updated {format(new Date(task.updated_at), "MMM d, yyyy")}
+          </DialogDescription>
+        </DialogHeader>
+        <Button type="button" variant="outline" size="sm" className="w-fit gap-1.5" onClick={handleToggle} disabled={toggle.isPending}>
+          {task.completed ? <Circle className="h-4 w-4" aria-hidden /> : <CheckCircle2 className="h-4 w-4" aria-hidden />}
+          {task.completed ? "Mark as not done" : "Mark as done"}
+        </Button>
+        <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4" noValidate>
+          <TaskFormFields
+            form={form}
+            idPrefix={`task-${task.id}`}
+            dealLabel={task.deals?.title}
+            contactLabel={task.contacts ? `${task.contacts.first_name} ${task.contacts.last_name}` : null}
+          />
+          <div className="flex flex-col-reverse gap-2 pt-1 sm:flex-row sm:items-center sm:justify-between">
+            <Button type="button" variant="ghost" className="text-destructive hover:text-destructive" onClick={handleDelete} disabled={pending}>
+              {deleteTask.isPending ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Trash2 className="h-4 w-4" aria-hidden />}
+              Delete
             </Button>
+            <div className="flex flex-col-reverse gap-2 sm:flex-row">
+              <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={pending}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={pending || !form.formState.isDirty}>
+                {updateTask.isPending ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Saving…
+                  </>
+                ) : (
+                  "Save changes"
+                )}
+              </Button>
+            </div>
           </div>
-        </div>
-
-        <div className="px-6 pb-6 pt-4 space-y-4">
-          {editing ? (
-            <div className="space-y-4">
-              <div className="space-y-2">
-                <Label>Title</Label>
-                <Input value={editTitle} onChange={(e) => setEditTitle(e.target.value)} required maxLength={200} />
-              </div>
-              <div className="space-y-2">
-                <Label>Description</Label>
-                <Textarea value={editDescription} onChange={(e) => setEditDescription(e.target.value)} rows={3} maxLength={2000} />
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <Label>Due date</Label>
-                  <Input type="datetime-local" value={editDueDate} onChange={(e) => setEditDueDate(e.target.value)} />
-                </div>
-                <div className="space-y-2">
-                  <Label>Priority</Label>
-                  <Select value={editPriority} onValueChange={setEditPriority}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="low">Low</SelectItem>
-                      <SelectItem value="medium">Medium</SelectItem>
-                      <SelectItem value="high">High</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-              <div className="space-y-2">
-                <Label>Link to deal</Label>
-                <Select value={editDealId} onValueChange={setEditDealId}>
-                  <SelectTrigger><SelectValue placeholder="None" /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="none">None</SelectItem>
-                    {deals?.map((d) => <SelectItem key={d.id} value={d.id}>{d.title}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-2">
-                <Label>Link to contact</Label>
-                <Select value={editContactId} onValueChange={setEditContactId}>
-                  <SelectTrigger><SelectValue placeholder="None" /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="none">None</SelectItem>
-                    {contacts?.map((c) => <SelectItem key={c.id} value={c.id}>{c.first_name} {c.last_name}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="flex gap-2">
-                <Button onClick={handleSave} disabled={updateTask.isPending}>
-                  <Save className="h-4 w-4 mr-1" /> Save
-                </Button>
-                <Button variant="ghost" onClick={() => setEditing(false)}>Cancel</Button>
-              </div>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              <div className="flex items-center gap-2">
-                <Badge variant={task.completed ? "secondary" : "default"}>
-                  {task.completed ? "Completed" : "To do"}
-                </Badge>
-                <Badge variant="outline" className={priorityColors[task.priority] || ""}>
-                  {task.priority} priority
-                </Badge>
-              </div>
-
-              {task.description && (
-                <p className="text-sm text-muted-foreground whitespace-pre-wrap">{task.description}</p>
-              )}
-
-              <Separator />
-
-              <div className="space-y-2 text-sm">
-                <div className="flex items-center gap-2">
-                  <Calendar className="h-4 w-4 text-muted-foreground shrink-0" />
-                  <span className="text-muted-foreground">Due:</span>
-                  <span>{task.due_date ? format(parseISO(task.due_date), "MMM d, yyyy 'at' h:mm a") : "—"}</span>
-                </div>
-                {task.deals && (
-                  <div className="flex items-center gap-2">
-                    <LinkIcon className="h-4 w-4 text-muted-foreground shrink-0" />
-                    <span className="text-muted-foreground">Deal:</span>
-                    <span>{task.deals.title}</span>
-                  </div>
-                )}
-                {task.contacts && (
-                  <div className="flex items-center gap-2">
-                    <LinkIcon className="h-4 w-4 text-muted-foreground shrink-0" />
-                    <span className="text-muted-foreground">Contact:</span>
-                    <span>{task.contacts.first_name} {task.contacts.last_name}</span>
-                  </div>
-                )}
-              </div>
-
-              <Separator />
-
-              <div className="space-y-2 text-xs text-muted-foreground">
-                <div className="flex items-center gap-2">
-                  <Calendar className="h-3.5 w-3.5" />
-                  <span>Created {format(new Date(task.created_at), "MMM d, yyyy 'at' h:mm a")}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Clock className="h-3.5 w-3.5" />
-                  <span>Updated {format(new Date(task.updated_at), "MMM d, yyyy 'at' h:mm a")}</span>
-                </div>
-              </div>
-
-              <Separator />
-
-              <AlertDialog>
-                <AlertDialogTrigger asChild>
-                  <Button variant="destructive" size="sm">
-                    <Trash2 className="h-4 w-4 mr-1" /> Delete task
-                  </Button>
-                </AlertDialogTrigger>
-                <AlertDialogContent>
-                  <AlertDialogHeader>
-                    <AlertDialogTitle>Delete task?</AlertDialogTitle>
-                    <AlertDialogDescription>This will permanently delete "{task.title}" and cannot be undone.</AlertDialogDescription>
-                  </AlertDialogHeader>
-                  <AlertDialogFooter>
-                    <AlertDialogCancel>Cancel</AlertDialogCancel>
-                    <AlertDialogAction onClick={handleDelete}>Delete</AlertDialogAction>
-                  </AlertDialogFooter>
-                </AlertDialogContent>
-              </AlertDialog>
-            </div>
-          )}
-        </div>
+        </form>
       </DialogContent>
     </Dialog>
   );

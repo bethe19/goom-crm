@@ -1,91 +1,146 @@
-import { useState } from "react";
-import { Deal } from "@/hooks/useDeals";
-import { PipelineStage } from "@/hooks/usePipelineStages";
-import { DealCard } from "./DealCard";
-import { formatCurrency } from "@/lib/formatters";
-import { Kanban, Plus } from "lucide-react";
+import { useRef, useState } from "react";
+import { Plus } from "lucide-react";
+import type { Deal } from "@/hooks/useDeals";
+import type { PipelineStage } from "@/hooks/usePipelineStages";
+import { formatCompactCurrency, formatCurrency } from "@/lib/formatters";
 import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { cn } from "@/lib/utils";
+import { DealCard } from "./DealCard";
+import { summarizeDeals } from "./dealUtils";
+import type { WorkspaceMember } from "./useWorkspaceMembers";
 
-interface KanbanColumnProps {
+export interface KanbanColumnProps {
   stage: PipelineStage;
+  stages: PipelineStage[];
   deals: Deal[];
-  onDrop: (dealId: string, stageId: string) => void;
-  onDealClick: (deal: Deal) => void;
+  currency?: string;
+  ownerOf: (deal: Deal) => WorkspaceMember | undefined;
+  stageInfo: (deal: Deal) => { days: number | null; since: string | null };
+  draggingId: string | null;
+  onDropDeal: (dealId: string, stage: PipelineStage) => void;
+  onOpen: (deal: Deal) => void;
+  onMove: (deal: Deal, stage: PipelineStage) => void;
   onAddDeal: (stageId: string) => void;
+  onDragStart: (deal: Deal) => void;
+  onDragEnd: () => void;
 }
 
-export function KanbanColumn({ stage, deals, onDrop, onDealClick, onAddDeal }: KanbanColumnProps) {
-  const [isDragOver, setIsDragOver] = useState(false);
-  const totalValue = deals.reduce((sum, d) => sum + Number(d.value || 0), 0);
+export function KanbanColumn({
+  stage,
+  stages,
+  deals,
+  currency,
+  ownerOf,
+  stageInfo,
+  draggingId,
+  onDropDeal,
+  onOpen,
+  onMove,
+  onAddDeal,
+  onDragStart,
+  onDragEnd,
+}: KanbanColumnProps) {
+  const [isOver, setIsOver] = useState(false);
+  // dragenter/dragleave fire for every child; count them so the highlight doesn't flicker.
+  const depth = useRef(0);
+  const summary = summarizeDeals(deals);
+  const draggingFromHere = !!draggingId && deals.some((d) => d.id === draggingId);
+  const canDrop = !!draggingId && !draggingFromHere;
 
   return (
-    <div className="w-[280px] flex-shrink-0">
-      {/* 2026 Modern Stage Column Header */}
-      <div className="mb-2.5 flex items-center justify-between rounded-lg bg-card/60 px-3 py-2 border border-border/70 shadow-2xs">
-        <div className="flex items-center gap-2 min-w-0">
-          <span
-            className="h-2.5 w-2.5 rounded-full shrink-0"
-            style={{ backgroundColor: stage.color }}
-          />
-          <h3 className="text-xs font-semibold text-foreground truncate">{stage.name}</h3>
-          <span className="rounded-full bg-secondary px-2 py-0.2 text-[10px] font-mono font-medium text-muted-foreground">
-            {deals.length}
+    <section
+      aria-label={`${stage.name}: ${summary.count} deals`}
+      className="flex w-[85vw] max-w-[320px] shrink-0 snap-start flex-col sm:w-72"
+    >
+      <header className="mb-2 flex items-center justify-between gap-2 px-1">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: stage.color }} aria-hidden />
+          <h2 className="truncate text-sm font-semibold text-foreground">{stage.name}</h2>
+          <span className="rounded-full bg-secondary px-1.5 text-xs font-medium tabular-nums text-muted-foreground" aria-label={`${summary.count} deals`}>
+            {summary.count}
           </span>
         </div>
-
-        {totalValue > 0 && (
-          <span className="text-[11px] font-bold text-foreground font-mono">
-            {formatCurrency(totalValue)}
-          </span>
-        )}
-      </div>
+        <div className="flex items-center gap-1">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span tabIndex={0} className="rounded text-xs font-medium tabular-nums text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                {formatCompactCurrency(summary.total, currency)}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent className="text-xs">
+              <p>Total: {formatCurrency(summary.total, currency)}</p>
+              <p>Weighted: {formatCurrency(summary.weighted, currency)}</p>
+            </TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" onClick={() => onAddDeal(stage.id)} aria-label={`Add deal to ${stage.name}`}>
+                <Plus className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Add deal</TooltipContent>
+          </Tooltip>
+        </div>
+      </header>
 
       <div
-        id={`column-${stage.id}`}
         data-stage-id={stage.id}
-        className={`space-y-2.5 rounded-xl p-2.5 min-h-[460px] border transition-all duration-200 ${
-          isDragOver
-            ? "border-foreground/70 bg-secondary/60 ring-2 ring-foreground/10"
-            : "border-border/60 bg-muted/20"
-        }`}
+        className={cn(
+          "flex min-h-[420px] flex-1 flex-col gap-2 rounded-xl border p-2 transition-colors duration-150 ease-out",
+          isOver && canDrop ? "border-foreground/40 bg-secondary/70" : canDrop ? "border-dashed border-border bg-muted/40" : "border-border/60 bg-muted/30",
+        )}
+        onDragEnter={(e) => {
+          e.preventDefault();
+          depth.current += 1;
+          setIsOver(true);
+        }}
         onDragOver={(e) => {
           e.preventDefault();
           e.dataTransfer.dropEffect = "move";
-          setIsDragOver(true);
         }}
-        onDragLeave={() => setIsDragOver(false)}
+        onDragLeave={() => {
+          depth.current = Math.max(0, depth.current - 1);
+          if (depth.current === 0) setIsOver(false);
+        }}
         onDrop={(e) => {
           e.preventDefault();
-          setIsDragOver(false);
-          const dealId = e.dataTransfer.getData("dealId") || e.dataTransfer.getData("text/plain");
-          if (dealId) onDrop(dealId, stage.id);
+          depth.current = 0;
+          setIsOver(false);
+          const dealId = e.dataTransfer.getData("text/plain") || draggingId;
+          if (dealId) onDropDeal(dealId, stage);
         }}
       >
-        {deals.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-16 text-center">
-            <Kanban className="h-7 w-7 text-muted-foreground/30 mb-2" />
-            <p className="text-xs text-muted-foreground/60 font-medium">No deals in stage</p>
-          </div>
-        ) : (
-          deals.map((deal) => (
+        {deals.map((deal) => {
+          const info = stageInfo(deal);
+          return (
             <DealCard
               key={deal.id}
               deal={deal}
-              stageColor={stage.color}
-              onClick={() => onDealClick(deal)}
+              stage={stage}
+              stages={stages}
+              owner={ownerOf(deal)}
+              currency={currency}
+              daysInStage={info.days}
+              stageEnteredAt={info.since}
+              dragging={draggingId === deal.id}
+              onOpen={onOpen}
+              onMove={onMove}
+              onDragStart={onDragStart}
+              onDragEnd={onDragEnd}
             />
-          ))
+          );
+        })}
+        {deals.length === 0 && (
+          <button
+            type="button"
+            onClick={() => onAddDeal(stage.id)}
+            className="flex flex-1 items-center justify-center rounded-lg border border-dashed border-border/70 px-3 py-8 text-xs text-muted-foreground transition-colors hover:border-foreground/30 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {canDrop ? "Drop here" : "No deals — add one"}
+          </button>
         )}
-
-        <Button
-          variant="ghost"
-          size="sm"
-          className="w-full mt-2 h-8 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-card/70 border border-dashed border-border/70 rounded-lg"
-          onClick={() => onAddDeal(stage.id)}
-        >
-          <Plus className="h-3.5 w-3.5 mr-1" /> Add deal
-        </Button>
       </div>
-    </div>
+    </section>
   );
 }

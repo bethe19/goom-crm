@@ -12,14 +12,17 @@ export interface EmailTemplate {
   updated_at: string;
 }
 
+const templatesKey = ["email-templates"] as const;
+
+/** Email templates of the current workspace (RLS-scoped), sorted by name. */
 export function useEmailTemplates() {
-  const { user } = useAuth();
+  const { user, organization } = useAuth();
   return useQuery({
-    queryKey: ["email-templates"],
+    queryKey: [...templatesKey, organization?.id],
     queryFn: async () => {
       const { data, error } = await supabase.from("email_templates").select("*").order("name");
       if (error) throw error;
-      return (data as unknown) as EmailTemplate[];
+      return (data ?? []) as unknown as EmailTemplate[];
     },
     enabled: !!user,
   });
@@ -31,9 +34,9 @@ export function useCreateEmailTemplate() {
     mutationFn: async (template: { user_id: string; name: string; subject: string; body: string }) => {
       const { data, error } = await supabase.from("email_templates").insert(template).select().single();
       if (error) throw error;
-      return data;
+      return data as unknown as EmailTemplate;
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["email-templates"] }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: templatesKey }),
   });
 }
 
@@ -43,9 +46,9 @@ export function useUpdateEmailTemplate() {
     mutationFn: async ({ id, ...updates }: { id: string; name?: string; subject?: string; body?: string }) => {
       const { data, error } = await supabase.from("email_templates").update(updates).eq("id", id).select().single();
       if (error) throw error;
-      return data;
+      return data as unknown as EmailTemplate;
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["email-templates"] }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: templatesKey }),
   });
 }
 
@@ -56,6 +59,6 @@ export function useDeleteEmailTemplate() {
       const { error } = await supabase.from("email_templates").delete().eq("id", id);
       if (error) throw error;
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["email-templates"] }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: templatesKey }),
   });
 }

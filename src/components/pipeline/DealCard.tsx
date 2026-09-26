@@ -1,93 +1,140 @@
-import { Deal } from "@/hooks/useDeals";
-import { formatCurrency, formatDate } from "@/lib/formatters";
-import { Calendar, DollarSign, GripVertical, Sparkles } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
+import { memo } from "react";
+import { format, parseISO } from "date-fns";
+import { CalendarDays, Check, MoreHorizontal, ArrowRightLeft } from "lucide-react";
+import type { Deal } from "@/hooks/useDeals";
+import type { PipelineStage } from "@/hooks/usePipelineStages";
+import { formatCurrency, formatFriendlyDate } from "@/lib/formatters";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { cn } from "@/lib/utils";
+import { isDealOverdue } from "./dealUtils";
+import { MemberAvatar } from "./MemberAvatar";
+import type { WorkspaceMember } from "./useWorkspaceMembers";
 
 interface DealCardProps {
-  deal: Deal & { priority?: string; ai_score?: number };
-  stageColor: string;
-  onClick: () => void;
+  deal: Deal;
+  stage: PipelineStage | undefined;
+  stages: PipelineStage[];
+  owner: WorkspaceMember | undefined;
+  currency?: string;
+  /** Days in the current stage, when known. */
+  daysInStage?: number | null;
+  stageEnteredAt?: string | null;
+  dragging?: boolean;
+  onOpen: (deal: Deal) => void;
+  onMove: (deal: Deal, stage: PipelineStage) => void;
+  onDragStart?: (deal: Deal) => void;
+  onDragEnd?: () => void;
 }
 
-export function DealCard({ deal, stageColor, onClick }: DealCardProps) {
-  const priority = deal.priority || (deal.value > 100000 ? "urgent" : deal.value > 60000 ? "high" : "medium");
+function DealCardImpl({
+  deal,
+  stage,
+  stages,
+  owner,
+  currency,
+  daysInStage,
+  stageEnteredAt,
+  dragging,
+  onOpen,
+  onMove,
+  onDragStart,
+  onDragEnd,
+}: DealCardProps) {
+  const overdue = isDealOverdue(deal, stage);
 
   return (
     <div
       draggable
-      id={`deal-${deal.id}`}
       data-deal-id={deal.id}
       onDragStart={(e) => {
         e.dataTransfer.setData("text/plain", deal.id);
-        e.dataTransfer.setData("dealId", deal.id);
         e.dataTransfer.effectAllowed = "move";
+        onDragStart?.(deal);
       }}
-      onClick={onClick}
-      className="group relative cursor-grab active:cursor-grabbing rounded-xl border border-border/80 bg-card p-3 shadow-xs transition-all duration-200 hover:shadow-md hover:border-foreground/40 hover:-translate-y-0.5 min-h-[50px] select-none"
+      onDragEnd={() => onDragEnd?.()}
+      className={cn(
+        "group relative cursor-grab select-none rounded-lg border border-border bg-card p-3 shadow-sm transition-[box-shadow,opacity,border-color] duration-150 ease-out hover:border-foreground/25 hover:shadow-md active:cursor-grabbing motion-reduce:transition-none",
+        dragging && "opacity-40",
+      )}
     >
-      <div
-        className="absolute left-0 top-0 h-full w-1 rounded-l-xl transition-all group-hover:w-1.5"
-        style={{ backgroundColor: stageColor }}
-      />
-      <div className="ml-1.5 space-y-2">
-        <div className="flex items-start justify-between gap-1">
-          <h4 className="text-xs font-semibold leading-snug text-foreground group-hover:text-primary transition-colors">
-            {deal.title}
-          </h4>
-          <GripVertical className="h-3.5 w-3.5 text-muted-foreground/40 opacity-0 group-hover:opacity-100 transition-opacity shrink-0" />
-        </div>
+      <div className="flex items-start justify-between gap-2">
+        <button
+          type="button"
+          onClick={() => onOpen(deal)}
+          className="min-w-0 text-left text-sm font-medium leading-snug text-foreground after:absolute after:inset-0 after:rounded-lg focus-visible:outline-none focus-visible:after:ring-2 focus-visible:after:ring-ring"
+        >
+          <span className="line-clamp-2 break-words">{deal.title}</span>
+        </button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="relative z-10 -mr-1.5 -mt-1 h-7 w-7 shrink-0 rounded-md text-muted-foreground opacity-100 focus-visible:opacity-100 sm:opacity-0 sm:group-hover:opacity-100 data-[state=open]:opacity-100"
+              aria-label={`Actions for ${deal.title}`}
+            >
+              <MoreHorizontal className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-52">
+            <DropdownMenuItem onSelect={() => onOpen(deal)}>Open deal</DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel className="flex items-center gap-1.5 text-xs font-normal text-muted-foreground">
+              <ArrowRightLeft className="h-3.5 w-3.5" aria-hidden /> Move to…
+            </DropdownMenuLabel>
+            {stages.map((s) => (
+              <DropdownMenuItem key={s.id} disabled={s.id === deal.stage_id} onSelect={() => onMove(deal, s)} className="gap-2">
+                <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: s.color }} aria-hidden />
+                <span className="flex-1 truncate">{s.name}</span>
+                {s.id === deal.stage_id && <Check className="h-3.5 w-3.5" aria-label="Current stage" />}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
 
-        {deal.companies && (
-          <p className="text-[11px] font-medium text-muted-foreground truncate">
-            {deal.companies.name}
-          </p>
-        )}
+      {deal.companies?.name && <p className="mt-0.5 truncate text-xs text-muted-foreground">{deal.companies.name}</p>}
 
-        <div className="flex flex-wrap items-center justify-between gap-1.5 pt-0.5">
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            {deal.value > 0 && (
-              <span className="flex items-center font-semibold text-foreground text-xs">
-                {formatCurrency(deal.value)}
-              </span>
-            )}
-            {deal.probability > 0 && (
-              <span className="text-[10px] font-mono text-muted-foreground bg-secondary/80 rounded px-1.5 py-0.5">
-                {deal.probability}%
-              </span>
-            )}
-          </div>
+      <div className="mt-2.5 flex items-center justify-between gap-2">
+        <span className="text-sm font-semibold tabular-nums text-foreground">{formatCurrency(deal.value, currency)}</span>
+        <MemberAvatar member={owner} label="Owner" className="relative z-10" />
+      </div>
 
-          <Badge
-            variant="outline"
-            className={`text-[9px] font-semibold px-1.5 py-0 uppercase tracking-wider ${
-              priority === "urgent"
-                ? "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-400"
-                : priority === "high"
-                ? "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400"
-                : "border-border/60 text-muted-foreground"
-            }`}
-          >
-            {priority}
-          </Badge>
-        </div>
-
-        <div className="flex items-center justify-between text-[10px] text-muted-foreground pt-1 border-t border-border/40">
-          {deal.contacts ? (
-            <span className="truncate max-w-[120px]">
-              {deal.contacts.first_name} {deal.contacts.last_name}
+      {(deal.close_date || daysInStage != null) && (
+        <div className="mt-2 flex items-center justify-between gap-2 border-t border-border/60 pt-2 text-xs text-muted-foreground">
+          {deal.close_date ? (
+            <span className={cn("inline-flex items-center gap-1", overdue && "font-medium text-destructive")}>
+              <CalendarDays className="h-3.5 w-3.5" aria-hidden />
+              <span className="sr-only">Close date</span>
+              {formatFriendlyDate(deal.close_date)}
+              {overdue && <span className="sr-only">(overdue)</span>}
             </span>
           ) : (
             <span />
           )}
-
-          {deal.close_date && (
-            <span className="flex items-center gap-1 shrink-0">
-              <Calendar className="h-3 w-3" />
-              {formatDate(deal.close_date)}
-            </span>
+          {daysInStage != null && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="relative z-10 tabular-nums">{daysInStage}d in stage</span>
+              </TooltipTrigger>
+              <TooltipContent>
+                In {stage?.name ?? "this stage"} since {stageEnteredAt ? format(parseISO(stageEnteredAt), "MMM d, yyyy") : "creation"}
+              </TooltipContent>
+            </Tooltip>
           )}
         </div>
-      </div>
+      )}
     </div>
   );
 }
+
+export const DealCard = memo(DealCardImpl);

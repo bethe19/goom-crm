@@ -1,226 +1,211 @@
-import { createContext, useContext, useEffect, useState, ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState, ReactNode } from "react";
 import { Session, User } from "@supabase/supabase-js";
+import { useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
+import { isPlanId, planHasFeature, type PlanFeature, type PlanId } from "@/lib/plans";
+import { roleCan, type Permission } from "@/lib/permissions";
 
 export type AppRole = "admin" | "manager" | "rep";
+
+export type ContextErrorKind = "schema_outdated" | "network" | "no_workspace" | "suspended" | "other";
+
+/** Classifies a get_my_context failure so the UI can say what actually went wrong. */
+export function classifyContextError(error: { code?: string; message?: string } | null): ContextErrorKind {
+  if (!error) return "no_workspace";
+  const msg = (error.message ?? "").toLowerCase();
+  // PGRST202: function not in the schema cache; PGRST205 / 42P01 / 42883: missing table or function.
+  if (["PGRST202", "PGRST205", "42P01", "42883"].includes(error.code ?? "") || msg.includes("could not find the function")) {
+    return "schema_outdated";
+  }
+  if (msg.includes("suspended")) return "suspended";
+  if (msg.includes("failed to fetch") || msg.includes("network")) return "network";
+  return "other";
+}
+
+export interface Organization {
+  id: string;
+  name: string;
+  monthly_quota: number;
+  currency: string;
+  plan: PlanId;
+}
+
+/** sessionStorage key holding an invitation token until the invitee is signed in. */
+export const INVITE_TOKEN_KEY = "goom_invite_token";
 
 interface AuthContextType {
   session: Session | null;
   user: User | null;
+  /** The workspace the user is currently working in. Every record belongs to one. */
+  organization: Organization | null;
+  /** The user's role in the current workspace. */
   userRole: AppRole | null;
   isAdmin: boolean;
   isManager: boolean;
+  /** Admins and managers: may delete others' records, change settings, see team reports. */
+  canManage: boolean;
+  /** RBAC check for the current workspace role (see src/lib/permissions.ts). */
+  can: (permission: Permission) => boolean;
+  /** Whether the current workspace's plan includes a feature (see src/lib/plans.ts). */
+  hasFeature: (feature: PlanFeature) => boolean;
+  /** SaaS operator (platform_admins table): may open /platform. Never grants access to workspace data. */
+  isPlatformAdmin: boolean;
+  /** True until the session AND (when signed in) the workspace + role have resolved. */
   loading: boolean;
-  isDemoMode: boolean;
-  enterDemoMode: () => void;
-  exitDemoMode: () => void;
+  /** Set when the workspace context couldn't be loaded (e.g. database migrations not applied). */
+  contextError: string | null;
+  /** Why it failed: the database is missing the workspace schema, the network failed, or something else. */
+  contextErrorKind: ContextErrorKind | null;
   signOut: () => Promise<void>;
+  /** Re-fetches workspace + role (after accepting an invite, renaming the workspace, role changes). */
   refreshUserRole: () => Promise<void>;
 }
 
-// Demo user for display purposes only — never used to make real DB calls
-const DEMO_USER: User = {
-  id: "demo-user-alex-vance",
-  app_metadata: {},
-  user_metadata: { full_name: "Alex Vance", company: "Goom Global", title: "Account Executive" },
-  aud: "authenticated",
-  created_at: "2026-01-01T00:00:00Z",
-  email: "alex.vance@goomcrm.io",
-  role: "authenticated",
-  updated_at: new Date().toISOString(),
+const AuthContext = createContext<AuthContextType | null>(null);
+
+export const useAuth = () => {
+  const ctx = useContext(AuthContext);
+  if (!ctx) throw new Error("useAuth must be used inside <AuthProvider>");
+  return ctx;
 };
 
-const AuthContext = createContext<AuthContextType>({
-  session: null,
-  user: null,
-  userRole: null,
-  isAdmin: false,
-  isManager: false,
-  loading: true,
-  isDemoMode: false,
-  enterDemoMode: () => {},
-  exitDemoMode: () => {},
-  signOut: async () => {},
-  refreshUserRole: async () => {},
-});
-
-export const useAuth = () => useContext(AuthContext);
+type MyContextRow = {
+  organization_id: string;
+  organization_name: string;
+  monthly_quota: number | null;
+  currency: string | null;
+  role: AppRole;
+  plan: string | null;
+  is_platform_admin: boolean | null;
+};
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const queryClient = useQueryClient();
   const [session, setSession] = useState<Session | null>(null);
+  const [sessionResolved, setSessionResolved] = useState(false);
+  const [organization, setOrganization] = useState<Organization | null>(null);
   const [userRole, setUserRole] = useState<AppRole | null>(null);
-  const [loading, setLoading] = useState<boolean>(() => {
-    return localStorage.getItem("goom_demo_active") !== "true";
-  });
-  const [isDemoMode, setIsDemoMode] = useState<boolean>(() => {
-    return localStorage.getItem("goom_demo_active") === "true";
-  });
+  const [isPlatformAdmin, setIsPlatformAdmin] = useState(false);
+  const [contextLoadedFor, setContextLoadedFor] = useState<string | null>(null);
+  const [contextError, setContextError] = useState<string | null>(null);
+  const [contextErrorKind, setContextErrorKind] = useState<ContextErrorKind | null>(null);
+  const loadingFor = useRef<string | null>(null);
 
-  const fetchRole = async (userId: string) => {
-    try {
-      const { data, error } = await supabase
-        .from("user_roles")
-        .select("role")
-        .eq("user_id", userId)
-        .maybeSingle();
+  const loadContext = useCallback(async (userId: string) => {
+    loadingFor.current = userId;
+    setContextError(null);
+    setContextErrorKind(null);
 
-      if (!error && data?.role) {
-        setUserRole(data.role as AppRole);
-      } else {
-        setUserRole("rep");
-      }
-    } catch {
-      // Silent: default to rep on network error
-      setUserRole("rep");
+    // Accept a pending invitation first so the user lands in the workspace they were invited to.
+    // (If the confirmation email was opened in another tab, get_my_context accepts the invite
+    // from the sign-up metadata server-side.)
+    const inviteToken = sessionStorage.getItem(INVITE_TOKEN_KEY);
+    if (inviteToken) {
+      const { error } = await supabase.rpc("accept_invitation", { p_token: inviteToken });
+      sessionStorage.removeItem(INVITE_TOKEN_KEY);
+      if (error) console.warn("Could not accept invitation:", error.message);
+      else queryClient.invalidateQueries();
     }
-  };
+
+    const { data, error } = await supabase.rpc("get_my_context");
+    if (loadingFor.current !== userId) return; // a newer sign-in superseded this load
+
+    const row = (Array.isArray(data) ? data[0] : data) as MyContextRow | null | undefined;
+    if (error || !row) {
+      setOrganization(null);
+      setUserRole(null);
+      setIsPlatformAdmin(false);
+      setContextError(error?.message ?? "No workspace found for this account.");
+      setContextErrorKind(classifyContextError(error));
+    } else {
+      setOrganization({
+        id: row.organization_id,
+        name: row.organization_name,
+        monthly_quota: Number(row.monthly_quota ?? 0),
+        currency: row.currency ?? "USD",
+        plan: isPlanId(row.plan) ? row.plan : "starter",
+      });
+      setUserRole(row.role);
+      setIsPlatformAdmin(!!row.is_platform_admin);
+    }
+    setContextLoadedFor(userId);
+  }, [queryClient]);
 
   useEffect(() => {
-    // 1. If demo active from previous session, restore it immediately
-    if (localStorage.getItem("goom_demo_active") === "true") {
-      setSession(null); // demo mode never has a real session
-      setIsDemoMode(true);
-      setUserRole("rep");
-      setLoading(false);
-      return;
-    }
+    let active = true;
 
-    let isMounted = true;
-
-    // Safety timeout: ensure loading is NEVER stuck at true for more than 1.5 seconds
-    const safetyTimeout = setTimeout(() => {
-      if (isMounted) {
-        setLoading(false);
+    // Supabase holds an auth lock during this callback: never await queries inside it.
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, newSession) => {
+      if (!active) return;
+      setSession(newSession);
+      setSessionResolved(true);
+      if (!newSession) {
+        loadingFor.current = null;
+        setOrganization(null);
+        setUserRole(null);
+        setIsPlatformAdmin(false);
+        setContextLoadedFor(null);
+        if (event === "SIGNED_OUT") queryClient.clear();
+      } else if (event === "SIGNED_IN" || event === "INITIAL_SESSION" || event === "USER_UPDATED") {
+        const uid = newSession.user.id;
+        if (loadingFor.current !== uid) setTimeout(() => active && loadContext(uid), 0);
       }
-    }, 1500);
+    });
 
-    // 2. Subscribe to auth changes
-    // CRITICAL: Do NOT await supabase queries directly inside onAuthStateChange callback,
-    // as Supabase auth v2 holds an internal mutex that deadlocks PostgREST queries.
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      (_event, newSession) => {
-        if (!isMounted) return;
-
-        if (localStorage.getItem("goom_demo_active") === "true") {
-          return;
-        }
-
-        setSession(newSession);
-        setLoading(false);
-
-        if (newSession?.user) {
-          // Defer role query to next microtask outside the auth event lock
-          setTimeout(() => {
-            if (isMounted) {
-              fetchRole(newSession.user.id);
-            }
-          }, 0);
-        } else {
-          setUserRole(null);
-        }
-      }
-    );
-
-    // 3. Resolve initial session on mount
     supabase.auth.getSession()
-      .then(({ data: { session: currentSession } }) => {
-        if (!isMounted) return;
-        if (localStorage.getItem("goom_demo_active") === "true") return;
-
-        setSession(currentSession);
-        if (currentSession?.user) {
-          setTimeout(() => {
-            if (isMounted) fetchRole(currentSession.user.id);
-          }, 0);
-        } else {
-          setUserRole(null);
-        }
+      .then(({ data: { session: current } }) => {
+        if (!active) return;
+        setSession(current);
+        if (current?.user && loadingFor.current !== current.user.id) loadContext(current.user.id);
       })
-      .catch(() => {
-        // Silent: network error handled by safety timeout
-      })
-      .finally(() => {
-        if (isMounted && localStorage.getItem("goom_demo_active") !== "true") {
-          setLoading(false);
-        }
-      });
+      .catch(() => { /* network error: user sees the sign-in screen */ })
+      .finally(() => active && setSessionResolved(true));
 
     return () => {
-      isMounted = false;
-      clearTimeout(safetyTimeout);
+      active = false;
       subscription.unsubscribe();
     };
-  }, []);
+  }, [loadContext, queryClient]);
 
-  const refreshUserRole = async () => {
-    if (session?.user?.id && !isDemoMode) {
-      await fetchRole(session.user.id);
+  const refreshUserRole = useCallback(async () => {
+    if (session?.user?.id) {
+      loadingFor.current = null;
+      await loadContext(session.user.id);
     }
-  };
+  }, [session?.user?.id, loadContext]);
 
-  const enterDemoMode = () => {
-    localStorage.setItem("goom_demo_active", "true");
-    setIsDemoMode(true);
-    setSession(null); // no real session in demo mode
-    setUserRole("rep");
-    setLoading(false);
-  };
-
-  const exitDemoMode = () => {
-    localStorage.removeItem("goom_demo_active");
-    setIsDemoMode(false);
-    setUserRole(null);
-    setLoading(true);
-
-    const safety = setTimeout(() => setLoading(false), 1500);
-
-    supabase.auth.getSession()
-      .then(({ data: { session: currentSession } }) => {
-        setSession(currentSession);
-        if (currentSession?.user) {
-          setTimeout(() => fetchRole(currentSession.user.id), 0);
-        }
-      })
-      .catch(() => {
-        setSession(null);
-      })
-      .finally(() => {
-        clearTimeout(safety);
-        setLoading(false);
-      });
-  };
-
-  const signOut = async () => {
-    localStorage.removeItem("goom_demo_active");
-    setIsDemoMode(false);
-    setSession(null);
-    setUserRole(null);
+  const signOut = useCallback(async () => {
     try {
       await supabase.auth.signOut();
     } catch {
-      // Silent: best-effort sign out
+      // best effort; local state is cleared by onAuthStateChange or below
     }
-  };
+    setSession(null);
+    setOrganization(null);
+    setUserRole(null);
+    setIsPlatformAdmin(false);
+    queryClient.clear();
+  }, [queryClient]);
 
-  // Role-based flags — never granted in demo mode
-  const isAdmin = !isDemoMode && userRole === "admin";
-  const isManager = !isDemoMode && userRole === "manager";
-
-  // In demo mode expose the demo user for display; otherwise use the real session user
-  const user = isDemoMode ? DEMO_USER : (session?.user ?? null);
+  const user = session?.user ?? null;
+  const loading = !sessionResolved || (!!user && contextLoadedFor !== user.id);
 
   return (
     <AuthContext.Provider
       value={{
         session,
         user,
+        organization,
         userRole,
-        isAdmin,
-        isManager,
+        isAdmin: userRole === "admin",
+        isManager: userRole === "manager",
+        canManage: userRole === "admin" || userRole === "manager",
+        can: (permission: Permission) => roleCan(userRole, permission),
+        hasFeature: (feature: PlanFeature) => planHasFeature(organization?.plan, feature),
+        isPlatformAdmin,
         loading,
-        isDemoMode,
-        enterDemoMode,
-        exitDemoMode,
+        contextError,
+        contextErrorKind,
         signOut,
         refreshUserRole,
       }}
