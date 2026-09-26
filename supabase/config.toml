@@ -247,6 +247,11 @@ otp_expiry = 3600
 # subject = "You have been invited"
 # content_path = "./supabase/templates/invite.html"
 
+[auth.email.template.confirm_signup]
+subject = "Confirm your Goom CRM email address"
+content_path = "./supabase/templates/confirm_signup.html"
+
+
 # Uncomment to customize notification email template
 # [auth.email.notification.password_changed]
 # enabled = true
