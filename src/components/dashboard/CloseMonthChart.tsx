@@ -23,7 +23,7 @@ interface CloseMonthChartProps {
 }
 
 /** Open deals by expected close month, with overdue and undated deals called out. */
-export function CloseMonthChart({ months, overdue, noDateCount, currency = "USD", loading, error, onRetry, forecastHref, className }: CloseMonthChartProps) {
+export function CloseMonthChart({ months, overdue, noDateCount, currency = "ETB", loading, error, onRetry, forecastHref, className }: CloseMonthChartProps) {
   const data = months.map((m) => ({ key: m.key, label: m.label, value: m.total, count: m.deals.length, weighted: m.weighted }));
   const total = data.reduce((s, d) => s + d.value, 0);
   const count = data.reduce((s, d) => s + d.count, 0);

@@ -33,7 +33,7 @@ export function WorkspaceSettings() {
     resolver: zodResolver(schema),
     defaultValues: {
       name: organization?.name ?? "",
-      currency: organization?.currency ?? "USD",
+      currency: organization?.currency ?? "ETB",
       monthly_quota: organization?.monthly_quota ?? 0,
     },
   });

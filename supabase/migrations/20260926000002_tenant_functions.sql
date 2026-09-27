@@ -768,7 +768,7 @@ BEGIN
         RAISE EXCEPTION 'Monthly quota must be zero or a positive amount.' USING ERRCODE = 'P0001';
     END IF;
     IF v_currency IS NOT NULL AND v_currency !~ '^[A-Z]{3}$' THEN
-        RAISE EXCEPTION 'Currency must be a 3-letter ISO code such as USD.' USING ERRCODE = 'P0001';
+        RAISE EXCEPTION 'Currency must be a 3-letter ISO code such as ETB.' USING ERRCODE = 'P0001';
     END IF;
 
     UPDATE public.organizations o

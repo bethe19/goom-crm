@@ -272,7 +272,7 @@ function WorkspaceStep({ onBack, onNext }: { onBack: () => void; onNext: () => v
   const setPlan = useSetWorkspacePlan();
   const { register, handleSubmit, formState, setValue, watch } = useForm<z.infer<typeof workspaceSchema>>({
     resolver: zodResolver(workspaceSchema),
-    defaultValues: { name: organization?.name ?? "", currency: organization?.currency ?? "USD" },
+    defaultValues: { name: organization?.name ?? "", currency: organization?.currency ?? "ETB" },
   });
   const currency = watch("currency");
 

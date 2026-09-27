@@ -20,7 +20,7 @@ type Datum = ForecastMonth & { expected: number };
 export function ForecastChart({
   months,
   quota,
-  currency = "USD",
+  currency = "ETB",
   onSelectMonth,
   height = 280,
 }: {

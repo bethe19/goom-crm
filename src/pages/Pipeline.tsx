@@ -70,7 +70,7 @@ export default function Pipeline() {
   const hasStageHistory = hasFeature("audit_history");
   const seesAll = can("records.view_all");
   const canManagePipelines = can("pipelines.manage");
-  const currency = organization?.currency ?? "USD";
+  const currency = organization?.currency ?? "ETB";
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();

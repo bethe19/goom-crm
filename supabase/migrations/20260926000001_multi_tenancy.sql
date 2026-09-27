@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS public.organizations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL,
     monthly_quota NUMERIC(14,2) NOT NULL DEFAULT 0,
-    currency TEXT NOT NULL DEFAULT 'USD',
+    currency TEXT NOT NULL DEFAULT 'ETB',
     created_by UUID REFERENCES auth.users(id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

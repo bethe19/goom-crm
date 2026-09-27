@@ -55,7 +55,7 @@ export function WinLossCard({
   won,
   lost,
   series,
-  currency = "USD",
+  currency = "ETB",
   loading,
   error,
   onRetry,

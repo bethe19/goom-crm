@@ -122,7 +122,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         id: row.organization_id,
         name: row.organization_name,
         monthly_quota: Number(row.monthly_quota ?? 0),
-        currency: row.currency ?? "USD",
+        currency: row.currency ?? "ETB",
         plan: isPlanId(row.plan) ? row.plan : "starter",
       });
       setUserRole(row.role);

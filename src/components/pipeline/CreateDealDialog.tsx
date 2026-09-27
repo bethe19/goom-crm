@@ -182,7 +182,7 @@ export function CreateDealDialog({
               {errors.stage_id && <p className="text-xs text-destructive">{errors.stage_id.message}</p>}
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="deal-value">Value ({organization?.currency ?? "USD"})</Label>
+              <Label htmlFor="deal-value">Value ({organization?.currency ?? "ETB"})</Label>
               <Input id="deal-value" type="number" inputMode="decimal" min={0} step="any" placeholder="0" className="tabular-nums" aria-invalid={!!errors.value} {...register("value")} />
               {errors.value && <p className="text-xs text-destructive">{errors.value.message}</p>}
             </div>

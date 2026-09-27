@@ -66,7 +66,7 @@ function greeting(now: Date) {
 export default function Index() {
   const { user, organization, can, hasFeature } = useAuth();
   const navigate = useNavigate();
-  const currency = organization?.currency || "USD";
+  const currency = organization?.currency || "ETB";
   const teamView = can("team.view_reports");
   const hasHistoryFeature = hasFeature("audit_history");
   const hasForecast = hasFeature("forecast");

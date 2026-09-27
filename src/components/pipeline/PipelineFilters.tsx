@@ -29,7 +29,7 @@ function closeLabel(f: DealFilters) {
   return f.closeFrom ? `From ${fmt(f.closeFrom)}` : `Until ${fmt(f.closeTo)}`;
 }
 
-export function PipelineFilters({ filters, onChange, onClear, members, currentUserId, currency = "USD", className }: PipelineFiltersProps) {
+export function PipelineFilters({ filters, onChange, onClear, members, currentUserId, currency = "ETB", className }: PipelineFiltersProps) {
   const now = new Date();
   const presets: { label: string; from: string; to: string }[] = [
     { label: "This month", from: iso(startOfMonth(now)), to: iso(endOfMonth(now)) },

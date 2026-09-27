@@ -224,7 +224,7 @@ function DealDetailBody({ deal, stagesProp, onClose }: { deal: Deal; stagesProp?
             <div className="grid grid-cols-1 gap-x-6 gap-y-4 sm:grid-cols-2">
               <InlineField
                 id="deal-value-inline"
-                label={`Value (${currency ?? "USD"})`}
+                label={`Value (${currency ?? "ETB"})`}
                 type="number"
                 value={String(deal.value ?? 0)}
                 display={<span className="font-medium tabular-nums">{formatCurrency(deal.value, currency)}</span>}

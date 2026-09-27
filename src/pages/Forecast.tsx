@@ -61,7 +61,7 @@ export default function Forecast() {
 function ForecastView() {
   const { organization, isAdmin, can } = useAuth();
   const navigate = useNavigate();
-  const currency = organization?.currency || "USD";
+  const currency = organization?.currency || "ETB";
   const quota = Number(organization?.monthly_quota ?? 0);
   const teamView = can("team.view_reports");
   const [horizon, setHorizon] = useState<3 | 6>(6);

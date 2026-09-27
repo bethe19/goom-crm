@@ -44,7 +44,7 @@ function days(n: number) {
  */
 export function PipelineFunnelChart({
   rows,
-  currency = "USD",
+  currency = "ETB",
   loading,
   error,
   onRetry,

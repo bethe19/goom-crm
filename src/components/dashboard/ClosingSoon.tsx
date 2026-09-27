@@ -33,7 +33,7 @@ function whenLabel(days: number | null): string {
 /** Open deals with a close date in the next 30 days (computed by the caller). */
 export function ClosingSoon({
   deals,
-  currency = "USD",
+  currency = "ETB",
   loading,
   error,
   onRetry,

@@ -21,7 +21,7 @@ export function Leaderboard({
   rows,
   members,
   membersLoading,
-  currency = "USD",
+  currency = "ETB",
   loading,
   className,
   description = "Won in the period, with each owner's open pipeline today",

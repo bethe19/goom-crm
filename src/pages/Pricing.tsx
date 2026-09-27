@@ -134,6 +134,7 @@ function CellValue({ value, emphasize }: { value: Cell; emphasize?: boolean }) {
 /* ------------------------------------------------------------------ FAQ */
 
 const money = (n: number) => `$${n}`;
+const etbMoney = (n: number) => new Intl.NumberFormat(undefined, { style: "currency", currency: "ETB", minimumFractionDigits: 0 }).format(n * 120);
 
 const FAQS: { q: string; a: ReactNode }[] = [
   {
@@ -244,7 +245,7 @@ export default function Pricing() {
                         )}
                       </div>
                       <p className="mt-0.5 text-sm font-normal text-muted-foreground">
-                        <span className="tabular-nums">{money(plan.price)}</span>/month
+                        <span className="tabular-nums">{money(plan.price)}</span>/month <span className="ml-1 text-xs opacity-80">(≈ {etbMoney(plan.price)})</span>
                       </p>
                       <Button asChild size="sm" variant={id === POPULAR ? "default" : "outline"} className="mt-3 w-full">
                         <Link to={signupPathFor(id)}>Start on {plan.name}</Link>
@@ -308,7 +309,7 @@ export default function Pricing() {
                 <div>
                   <p className="font-semibold">{PLANS[mobilePlan].name}</p>
                   <p className="text-sm text-muted-foreground">
-                    <span className="tabular-nums">{money(PLANS[mobilePlan].price)}</span>/month
+                    <span className="tabular-nums">{money(PLANS[mobilePlan].price)}</span>/month <span className="ml-1 text-xs opacity-80">(≈ {etbMoney(PLANS[mobilePlan].price)})</span>
                   </p>
                 </div>
                 <Button asChild size="sm" variant={mobilePlan === POPULAR ? "default" : "outline"}>
@@ -379,9 +380,12 @@ function PlanCard({ plan, popular }: { plan: Plan; popular: boolean }) {
       </div>
       <p className="mt-2 text-sm text-muted-foreground lg:min-h-[60px]">{plan.tagline}</p>
 
-      <div className="mt-6 flex items-baseline gap-1.5">
-        <span className="text-4xl font-semibold tracking-tight tabular-nums">{money(plan.price)}</span>
-        <span className="text-sm text-muted-foreground">/ month per workspace</span>
+      <div className="mt-6 flex flex-col gap-1">
+        <div className="flex items-baseline gap-1.5">
+          <span className="text-4xl font-semibold tracking-tight tabular-nums">{money(plan.price)}</span>
+          <span className="text-sm text-muted-foreground">/ month per workspace</span>
+        </div>
+        <p className="text-sm font-medium text-muted-foreground">≈ {etbMoney(plan.price)} / month</p>
       </div>
       <p className="mt-1 text-xs text-muted-foreground">Free while billing is in beta</p>
 

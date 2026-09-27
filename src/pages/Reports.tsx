@@ -95,7 +95,7 @@ function dayCount(n: number) {
 export default function Reports() {
   const { organization, can, hasFeature } = useAuth();
   const { toast } = useToast();
-  const currency = organization?.currency || "USD";
+  const currency = organization?.currency || "ETB";
   const teamView = can("team.view_reports");
   const advanced = hasFeature("advanced_reports");
   const canExport = hasFeature("csv_export");

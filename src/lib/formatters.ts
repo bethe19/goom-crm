@@ -2,15 +2,15 @@ import { formatDistanceToNow, format, isToday, isTomorrow, isYesterday } from "d
 
 const currencyFormatters = new Map<string, Intl.NumberFormat>();
 
-/** Formats money in the workspace currency (pass `organization?.currency`); defaults to USD. */
-export function formatCurrency(value: number | null | undefined, currency = "USD"): string {
-  const key = currency || "USD";
+/** Formats money in the workspace currency (pass `organization?.currency`); defaults to ETB. */
+export function formatCurrency(value: number | null | undefined, currency = "ETB"): string {
+  const key = currency || "ETB";
   let fmt = currencyFormatters.get(key);
   if (!fmt) {
     try {
       fmt = new Intl.NumberFormat(undefined, { style: "currency", currency: key, minimumFractionDigits: 0, maximumFractionDigits: 0 });
     } catch {
-      fmt = new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 0, maximumFractionDigits: 0 });
+      fmt = new Intl.NumberFormat(undefined, { style: "currency", currency: "ETB", minimumFractionDigits: 0, maximumFractionDigits: 0 });
     }
     currencyFormatters.set(key, fmt);
   }
@@ -18,11 +18,11 @@ export function formatCurrency(value: number | null | undefined, currency = "USD
 }
 
 /** Compact money for tight spaces and chart axes: $1.2M, $840K. */
-export function formatCompactCurrency(value: number | null | undefined, currency = "USD"): string {
+export function formatCompactCurrency(value: number | null | undefined, currency = "ETB"): string {
   try {
-    return new Intl.NumberFormat(undefined, { style: "currency", currency: currency || "USD", notation: "compact", maximumFractionDigits: 1 }).format(Number(value ?? 0));
+    return new Intl.NumberFormat(undefined, { style: "currency", currency: currency || "ETB", notation: "compact", maximumFractionDigits: 1 }).format(Number(value ?? 0));
   } catch {
-    return formatCurrency(value, "USD");
+    return formatCurrency(value, "ETB");
   }
 }
 

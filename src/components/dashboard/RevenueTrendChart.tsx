@@ -45,7 +45,7 @@ interface RevenueTrendChartProps {
 /** Won revenue over time: gradient area for this period, a quiet line for the previous one. */
 export function RevenueTrendChart({
   points,
-  currency = "USD",
+  currency = "ETB",
   loading,
   error,
   onRetry,

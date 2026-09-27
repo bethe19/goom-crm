@@ -91,7 +91,7 @@ export function FloatingAiCopilot() {
   const logRef = useRef<HTMLDivElement>(null);
 
   const orgId = organization?.id ?? null;
-  const currency = organization?.currency || "USD";
+  const currency = organization?.currency || "ETB";
   const contextKey = useMemo(() => ["ai-context", orgId] as const, [orgId]);
 
   // Workspace snapshot: loaded when the panel opens (for suggestions) and reused at ask-time.
