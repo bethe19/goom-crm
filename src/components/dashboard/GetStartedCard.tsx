@@ -1,13 +1,10 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, ChevronRight, Database, Handshake, Loader2, Upload, UserPlus, X } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { Check, ChevronRight, Handshake, Upload, UserPlus, X } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
-import { useToast } from "@/hooks/use-toast";
 import { useWorkspaceMembers } from "@/hooks/useAnalytics";
-import { loadSampleData } from "@/lib/sampleData";
-import { sanitizeErrorMessage } from "@/lib/sanitize";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
@@ -61,21 +58,6 @@ export function GetStartedCard({ hasDeals, loading }: { hasDeals: boolean; loadi
   });
   const members = useWorkspaceMembers();
 
-  const sample = useMutation({
-    mutationFn: loadSampleData,
-    onSuccess: (res) => {
-      toast({
-        title: "Sample data added",
-        description: `${res.deals} deals, ${res.companies} companies, ${res.contacts} contacts, ${res.activities} activities and ${res.tasks} tasks.`,
-        variant: "success",
-      });
-      queryClient.invalidateQueries();
-    },
-    onError: (err) => {
-      toast({ title: "Couldn't load sample data", description: sanitizeErrorMessage((err as Error)?.message), variant: "destructive" });
-    },
-  });
-
   if (dismissed || loading || contacts.isLoading) return null;
 
   const steps: Step[] = [
@@ -90,7 +72,7 @@ export function GetStartedCard({ hasDeals, loading }: { hasDeals: boolean; loadi
     {
       id: "contacts",
       title: canImport ? "Import contacts" : "Add your first contact",
-      description: canImport ? "Bring in people from a CSV file." : "Keep track of the people you sell to.",
+      description: canImport ? "Bring in people from a spreadsheet or CSV." : "Keep track of the people you sell to.",
       icon: canImport ? Upload : UserPlus,
       done: (contacts.data ?? 0) > 0,
       to: canImport ? "/data" : "/contacts?new=1",
@@ -106,24 +88,9 @@ export function GetStartedCard({ hasDeals, loading }: { hasDeals: boolean; loadi
       to: "/settings?tab=team",
     });
   }
-  // Sample data is a workspace-level action: only admins/managers are offered it. Reps see no
-  // deals through RLS even in a populated workspace, so "no deals" says nothing about the workspace.
-  if (!hasDeals && canManage) {
-    steps.push({
-      id: "sample",
-      title: "Load sample data",
-      description: "Explore with fictional companies and deals.",
-      icon: Database,
-      done: false,
-      onClick: () => sample.mutate(),
-      pending: sample.isPending,
-      pendingLabel: "Loading sample data…",
-    });
-  }
 
-  const required = steps.filter((s) => s.id !== "sample");
-  const doneCount = required.filter((s) => s.done).length;
-  if (doneCount === required.length) return null;
+  const doneCount = steps.filter((s) => s.done).length;
+  if (doneCount === steps.length) return null;
 
   const dismiss = () => {
     setDismissed(true);

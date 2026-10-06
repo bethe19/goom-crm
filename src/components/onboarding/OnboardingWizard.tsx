@@ -5,7 +5,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ArrowLeft, ArrowRight, Check, Database, FileUp, Loader2, Plus, Sparkles, Trash2 } from "lucide-react";
+import { ArrowLeft, ArrowRight, Check, FileSpreadsheet, LayoutDashboard, Loader2, Plus, Trash2 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth, type AppRole } from "@/contexts/AuthContext";
 import { useMyProfile, useUpdateMyProfile } from "@/hooks/useMyProfile";
@@ -17,7 +17,6 @@ import { clearSelectedPlan, readSelectedPlan } from "./selectedPlan";
 import { LimitNotice } from "@/components/settings/UpgradePrompt";
 import { usePipelines, usePipelineStages } from "@/hooks/usePipelineStages";
 import { createInvitation, type CreatedInvitation } from "@/hooks/useTeam";
-import { loadSampleData } from "@/lib/sampleData";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -70,7 +69,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     workspace: { title: "Name your workspace", description: "Everything your team adds lives here." },
     pipeline: { title: "Your sales pipeline", description: "Deals move through these stages. You can change them anytime." },
     team: { title: "Invite your team", description: "Optional — you can always do this later from Settings → Team." },
-    start: { title: "How do you want to start?", description: "Pick one. Nothing here is permanent." },
+    start: { title: "You're all set to begin", description: "Choose how you'd like to get started in your workspace." },
     done: {
       title: `You're all set${organization ? ` in ${organization.name}` : ""}`,
       description: "Your teammates' deals, contacts and tasks are ready for you.",
@@ -571,73 +570,55 @@ function StartStep({
   finishing: boolean;
   onFinish: (to?: string) => Promise<void>;
 }) {
-  const [loadingSample, setLoadingSample] = useState(false);
-
-  const loadSample = async () => {
-    setLoadingSample(true);
-    try {
-      const result = await loadSampleData();
-      toast.success(`Sample data added: ${result.deals} deals, ${result.contacts} contacts, ${result.companies} companies`);
-      await onFinish("/dashboard");
-    } catch (err) {
-      const msg = err instanceof Error && !("code" in err) && !err.message.includes(":") ? err.message : errorMessage(err);
-      toast.error(msg);
-    } finally {
-      setLoadingSample(false);
-    }
-  };
-
-  const busy = finishing || loadingSample;
   const options = [
     {
-      icon: Sparkles,
-      title: "Load sample data",
-      description: "Explore with a small set of fictional companies, deals and tasks. Delete it whenever you like.",
-      onClick: loadSample,
-      pending: loadingSample,
-    },
-    {
-      icon: FileUp,
-      title: "Import a CSV",
-      description: "Bring contacts, companies or deals from a spreadsheet or another CRM.",
-      onClick: () => onFinish("/data"),
-      pending: false,
-    },
-    {
-      icon: Database,
-      title: "Start empty",
-      description: "Add your first deal and contacts by hand.",
+      icon: LayoutDashboard,
+      title: "Go straight to Dashboard",
+      description: "Start with a clean, empty workspace. Add your first deals, contacts, and tasks as you work.",
       onClick: () => onFinish("/dashboard"),
-      pending: false,
+      badge: "Clean start",
+    },
+    {
+      icon: FileSpreadsheet,
+      title: "Import from Excel or CSV",
+      description: "Bring existing contacts, companies, or deals using our official pre-formatted templates.",
+      onClick: () => onFinish("/data"),
+      badge: "Templates ready",
     },
   ];
 
   return (
     <div className="space-y-4">
-      <div className="space-y-2">
-        {options.map(({ icon: Icon, title, description, onClick, pending }) => (
+      <div className="space-y-3">
+        {options.map(({ icon: Icon, title, description, onClick, badge }) => (
           <button
             key={title}
             type="button"
-            disabled={busy}
+            disabled={finishing}
             onClick={onClick}
             className="flex w-full items-start gap-3 rounded-lg border border-border p-4 text-left transition-colors duration-150 hover:bg-secondary/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
           >
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-secondary">
-              {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Icon className="h-4 w-4" aria-hidden />}
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-secondary text-foreground">
+              <Icon className="h-4 w-4" aria-hidden />
             </span>
-            <span className="min-w-0">
-              <span className="block text-sm font-semibold">{pending ? "Adding sample data…" : title}</span>
+            <span className="min-w-0 flex-1">
+              <span className="flex items-center gap-2">
+                <span className="block text-sm font-semibold">{title}</span>
+                <span className="rounded-full bg-secondary px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                  {badge}
+                </span>
+              </span>
               <span className="block text-sm text-muted-foreground">{description}</span>
             </span>
           </button>
         ))}
       </div>
       <div className="flex">
-        <Button type="button" variant="ghost" size="sm" onClick={onBack} disabled={busy} className="gap-1">
+        <Button type="button" variant="ghost" size="sm" onClick={onBack} disabled={finishing} className="gap-1">
           <ArrowLeft className="h-4 w-4" /> Back
         </Button>
       </div>
     </div>
   );
 }
+

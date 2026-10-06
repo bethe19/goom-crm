@@ -26,6 +26,7 @@ import { CONTACT_SELECT } from "@/hooks/useContacts";
 import { PageBanner } from "@/components/PageBanner";
 import { EmptyState } from "@/components/common/States";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
@@ -33,6 +34,13 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { parseCsvObjects, downloadCsv } from "@/lib/csv";
+import {
+  downloadBrandedExcelTemplate,
+  downloadBrandedCsvTemplate,
+  parseImportSpreadsheet,
+  exportToExcel,
+  TEMPLATE_CONFIGS,
+} from "@/lib/excelTemplates";
 import { chunk, fetchAllRows } from "@/lib/fetchAll";
 import { errorMessage, isPlanLimitError } from "@/components/settings/validation";
 import { LimitNotice, UpgradePrompt } from "@/components/settings/UpgradePrompt";
@@ -190,6 +198,7 @@ function ImportWizard() {
 
   const [step, setStep] = useState<Step>("upload");
   const [entity, setEntity] = useState<ImportEntity>("contacts");
+  const templateCfg = TEMPLATE_CONFIGS[entity];
   const [fileName, setFileName] = useState("");
   const [headers, setHeaders] = useState<string[]>([]);
   const [rows, setRows] = useState<Record<string, string>[]>([]);
@@ -229,18 +238,25 @@ function ImportWizard() {
 
   const handleFile = async (file: File | undefined) => {
     if (!file) return;
-    if (!/\.csv$/i.test(file.name) && file.type !== "text/csv") {
-      toast.error("Choose a .csv file", { description: "Export your spreadsheet as CSV (comma-separated) and try again." });
+    const isSpreadsheet =
+      /\.(csv|xlsx|xls)$/i.test(file.name) ||
+      file.type === "text/csv" ||
+      file.type.includes("spreadsheet") ||
+      file.type.includes("excel");
+
+    if (!isSpreadsheet) {
+      toast.error("Choose an Excel (.xlsx) or CSV file", {
+        description: "Upload your data as .xlsx, .xls, or .csv to continue.",
+      });
       return;
     }
     if (file.size > MAX_FILE_BYTES) {
-      toast.error("File is too large", { description: "CSV files must be 5 MB or smaller. Split it into several files." });
+      toast.error("File is too large", { description: "Files must be 5 MB or smaller. Split it into several files." });
       return;
     }
     setReading(true);
     try {
-      const text = await file.text();
-      const parsed = parseCsvObjects(text);
+      const parsed = await parseImportSpreadsheet(file);
       const cleanHeaders = parsed.headers.filter((h, i) => h !== "" && parsed.headers.indexOf(h) === i);
       if (!cleanHeaders.length || !parsed.rows.length) {
         toast.error("Nothing to import", { description: "The file needs a header row and at least one data row." });
@@ -256,18 +272,26 @@ function ImportWizard() {
       setMapping(autoMapColumns(cleanHeaders, entity));
       setResult(null);
       setStep("map");
-    } catch {
-      toast.error("Couldn't read that file", { description: "Make sure it's a UTF-8 CSV file." });
+    } catch (err) {
+      toast.error("Couldn't read that file", {
+        description: err instanceof Error ? err.message : "Make sure it's a valid Excel (.xlsx) or UTF-8 CSV file.",
+      });
     } finally {
       setReading(false);
       if (fileRef.current) fileRef.current.value = "";
     }
   };
 
-  const downloadTemplate = () => {
-    const t = IMPORT_TEMPLATES[entity];
-    downloadCsv(`${entity}-import-template.csv`, t.headers, t.rows);
+  const handleDownloadExcel = () => {
+    downloadBrandedExcelTemplate(entity);
+    toast.success(`Downloaded ${TEMPLATE_CONFIGS[entity].title} Excel template (.xlsx)`);
   };
+
+  const handleDownloadCsv = () => {
+    downloadBrandedCsvTemplate(entity);
+    toast.success(`Downloaded ${TEMPLATE_CONFIGS[entity].title} CSV template (.csv)`);
+  };
+
 
   const runImport = async () => {
     if (!user) return;
@@ -489,6 +513,67 @@ function ImportWizard() {
             </div>
           </fieldset>
 
+          {/* Official Goom CRM Branded Template Card */}
+          <div className="rounded-xl border border-border bg-card p-5 sm:p-6 shadow-sm">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+              <div className="space-y-1.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+                    <FileSpreadsheet className="h-4 w-4" />
+                  </div>
+                  <h3 className="text-base font-semibold">
+                    Goom CRM Official {templateCfg.title} Template
+                  </h3>
+                  <Badge variant="outline" className="border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-medium text-[11px]">
+                    Brand Template
+                  </Badge>
+                </div>
+                <p className="text-sm text-muted-foreground max-w-2xl">
+                  {templateCfg.description} Includes a comprehensive <strong>Field Guide & Instructions sheet</strong>, pre-configured headers, auto-filters, and verified sample rows.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2.5 sm:shrink-0">
+                <Button
+                  onClick={handleDownloadExcel}
+                  className="gap-2 bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm font-medium"
+                >
+                  <FileSpreadsheet className="h-4 w-4" />
+                  Download Excel (.xlsx)
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={handleDownloadCsv}
+                  className="gap-2"
+                >
+                  <Download className="h-4 w-4" />
+                  Download CSV (.csv)
+                </Button>
+              </div>
+            </div>
+
+            {/* Quick Field Specification Pills */}
+            <div className="mt-4 pt-3.5 border-t border-border/80 flex flex-wrap items-center gap-1.5">
+              <span className="text-xs font-medium text-muted-foreground mr-1">Columns included:</span>
+              {templateCfg.fields.map((f) => (
+                <span
+                  key={f.key}
+                  className={cn(
+                    "inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-mono transition-colors",
+                    f.required
+                      ? "bg-primary/10 text-primary border border-primary/20 font-semibold"
+                      : "bg-secondary text-secondary-foreground border border-border/60"
+                  )}
+                  title={`${f.label} (${f.type}): ${f.description}`}
+                >
+                  {f.key}
+                  {f.required && <span className="text-destructive font-bold ml-0.5">*</span>}
+                </span>
+              ))}
+            </div>
+          </div>
+
+          {/* Drag & Drop Import File Upload */}
           <div
             onDragOver={(e) => {
               e.preventDefault();
@@ -506,25 +591,22 @@ function ImportWizard() {
             )}
           >
             <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-full bg-secondary">
-              {reading ? <Loader2 className="h-5 w-5 animate-spin" aria-hidden /> : <FileSpreadsheet className="h-5 w-5 text-muted-foreground" aria-hidden />}
+              {reading ? <Loader2 className="h-5 w-5 animate-spin" aria-hidden /> : <Upload className="h-5 w-5 text-muted-foreground" aria-hidden />}
             </div>
-            <p className="text-sm font-medium">{reading ? "Reading file…" : "Drop a CSV file here"}</p>
-            <p className="mt-1 text-xs text-muted-foreground">Up to 5 MB. The first row must contain column names.</p>
+            <p className="text-sm font-medium">{reading ? "Reading file…" : "Drop an Excel (.xlsx) or CSV file here"}</p>
+            <p className="mt-1 text-xs text-muted-foreground">Up to 5 MB. Multi-sheet Excel workbooks and standard CSV files supported.</p>
             <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
               <Button onClick={() => fileRef.current?.click()} disabled={reading}>
                 <Upload className="mr-1.5 h-4 w-4" aria-hidden /> Choose file
-              </Button>
-              <Button variant="ghost" onClick={downloadTemplate}>
-                <Download className="mr-1.5 h-4 w-4" aria-hidden /> Download {entity} template
               </Button>
             </div>
             <input
               ref={fileRef}
               type="file"
-              accept=".csv,text/csv"
+              accept=".xlsx,.xls,.csv,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
               className="sr-only"
               tabIndex={-1}
-              aria-label="CSV file"
+              aria-label="Spreadsheet or CSV file"
               onChange={(e) => handleFile(e.target.files?.[0])}
             />
           </div>
@@ -895,15 +977,21 @@ function ExportCard({ entity, count, loadingCount, countError }: { entity: Expor
   const cfg = EXPORTS[entity];
   const [progress, setProgress] = useState<{ loaded: number; total: number | null } | null>(null);
 
-  const run = async () => {
+  const run = async (format: "xlsx" | "csv" = "xlsx") => {
     setProgress({ loaded: 0, total: count ?? null });
     try {
       const rows = await fetchAllRows<Row>(
         (from, to) => (supabase.from(entity).select(cfg.select, { count: "exact" }) as Row).order("id").range(from, to),
         { onProgress: (loaded, total) => setProgress({ loaded, total }) },
       );
-      downloadCsv(`${entity}-${new Date().toISOString().slice(0, 10)}.csv`, cfg.headers, rows.map(cfg.toRow));
-      toast.success(`Exported ${formatNumber(rows.length)} ${entity}`);
+      const rowData = rows.map(cfg.toRow);
+      const dateStr = new Date().toISOString().slice(0, 10);
+      if (format === "xlsx") {
+        exportToExcel(`Goom-CRM-${cfg.label}-${dateStr}.xlsx`, cfg.label, cfg.headers, rowData);
+      } else {
+        downloadCsv(`Goom-CRM-${cfg.label}-${dateStr}.csv`, cfg.headers, rowData);
+      }
+      toast.success(`Exported ${formatNumber(rows.length)} ${entity} to ${format.toUpperCase()}`);
     } catch (err) {
       toast.error(`Couldn't export ${entity}`, { description: errorMessage(err) });
     } finally {
@@ -935,9 +1023,26 @@ function ExportCard({ entity, count, loadingCount, countError }: { entity: Expor
           </p>
         </div>
       ) : (
-        <Button variant="outline" size="sm" onClick={run} disabled={count === 0}>
-          <Download className="mr-1.5 h-4 w-4" aria-hidden /> {count === 0 ? "Nothing to export" : "Export CSV"}
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => run("xlsx")}
+            disabled={count === 0}
+            className="flex-1 gap-1.5"
+          >
+            <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-600" aria-hidden /> Excel
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => run("csv")}
+            disabled={count === 0}
+            className="flex-1 gap-1.5"
+          >
+            <Download className="h-3.5 w-3.5" aria-hidden /> CSV
+          </Button>
+        </div>
       )}
     </div>
   );

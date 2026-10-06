@@ -206,4 +206,29 @@ describe("helpers", () => {
     });
     expect(row).toEqual(["Ada", "L", "ada@x.io", "", "", "Acme", "a; b", "2026-01-02"]);
   });
+
+  it("verifies branded template configurations have complete specifications and valid sample rows", async () => {
+    const { TEMPLATE_CONFIGS } = await import("@/lib/excelTemplates");
+    for (const entity of ["contacts", "companies", "deals"] as const) {
+      const cfg = TEMPLATE_CONFIGS[entity];
+      expect(cfg.headers.length).toBeGreaterThan(0);
+      expect(cfg.fields.length).toBeGreaterThan(0);
+      expect(cfg.sampleRows.length).toBeGreaterThan(0);
+
+      // Verify all headers are covered by field specifications
+      const fieldKeys = cfg.fields.map((f) => f.key);
+      for (const h of cfg.headers) {
+        expect(fieldKeys).toContain(h);
+      }
+
+      // Verify autoMapColumns maps the template headers without missing required fields
+      const mapping = autoMapColumns(cfg.headers, entity);
+      expect(missingRequiredFields(entity, mapping)).toEqual([]);
+
+      // Verify each sample row has the same number of columns as headers
+      for (const row of cfg.sampleRows) {
+        expect(row.length).toBe(cfg.headers.length);
+      }
+    }
+  });
 });

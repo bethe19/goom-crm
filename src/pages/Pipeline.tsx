@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
-import { Columns3, Database, Kanban, List, Loader2, Plus, SearchX, Settings2 } from "lucide-react";
+import { Columns3, FileSpreadsheet, Kanban, List, Loader2, Plus, SearchX, Settings2 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
 import { usePipelines, usePipelineStages, type PipelineStage } from "@/hooks/usePipelineStages";
@@ -9,7 +9,6 @@ import { useDeal, useDeals, useMoveDeal, type Deal } from "@/hooks/useDeals";
 import { useStageEnteredAt } from "@/hooks/useDealAuditLog";
 import { useDebounce } from "@/hooks/useDebounce";
 import { useToast } from "@/hooks/use-toast";
-import { loadSampleData } from "@/lib/sampleData";
 import { formatCurrency } from "@/lib/formatters";
 import { errorMessage } from "@/components/settings/validation";
 import { PageBanner } from "@/components/PageBanner";
@@ -200,19 +199,6 @@ export default function Pipeline() {
   );
 
   // ── Empty-workspace actions ──
-  const [loadingSample, setLoadingSample] = useState(false);
-  const handleLoadSample = async () => {
-    setLoadingSample(true);
-    try {
-      const r = await loadSampleData();
-      await queryClient.invalidateQueries();
-      toast({ title: "Sample data loaded", description: `${r.deals} deals, ${r.companies} companies and ${r.contacts} contacts added.`, variant: "success" });
-    } catch (err) {
-      toast({ title: "Couldn't load sample data", description: errorMessage(err), variant: "destructive" });
-    } finally {
-      setLoadingSample(false);
-    }
-  };
   const [creatingPipeline, setCreatingPipeline] = useState(false);
   const handleCreatePipeline = async () => {
     setCreatingPipeline(true);
@@ -233,14 +219,6 @@ export default function Pipeline() {
     setCreateOpen(true);
   };
 
-  // Only offered to roles that see every deal: an empty rep view doesn't mean the workspace is empty.
-  const sampleButton = (
-    <Button variant="outline" onClick={handleLoadSample} disabled={loadingSample}>
-      {loadingSample ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Database className="h-4 w-4" aria-hidden />}
-      {loadingSample ? "Loading sample data…" : "Load sample data"}
-    </Button>
-  );
-
   // ── Content ──
   let content: React.ReactNode;
   if (pipelinesQ.isLoading) {
@@ -254,7 +232,7 @@ export default function Pipeline() {
         title="Set up your pipeline"
         description={
           canManagePipelines
-            ? "Create a pipeline with standard sales stages, or explore with sample data."
+            ? "Create a pipeline with standard sales stages to start tracking opportunities."
             : "This workspace doesn't have a pipeline yet. Ask an admin or manager to create one."
         }
         action={
@@ -265,7 +243,6 @@ export default function Pipeline() {
             </Button>
           ) : undefined
         }
-        secondaryAction={canManagePipelines ? sampleButton : undefined}
       />
     );
   } else if (stagesQ.isLoading || dealsQ.isLoading) {
@@ -317,7 +294,15 @@ export default function Pipeline() {
             <Plus className="h-4 w-4" aria-hidden /> Add deal
           </Button>
         }
-        secondaryAction={seesAll ? sampleButton : undefined}
+        secondaryAction={
+          seesAll ? (
+            <Button variant="outline" asChild>
+              <Link to="/data">
+                <FileSpreadsheet className="mr-1.5 h-4 w-4" /> Import deals
+              </Link>
+            </Button>
+          ) : undefined
+        }
       />
     );
   } else if (filtered.length === 0) {
