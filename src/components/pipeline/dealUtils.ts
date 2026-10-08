@@ -11,20 +11,40 @@ export interface DealFilters {
   closeTo: string;
   /** Minimum deal value, as typed (blank = no minimum). */
   minValue: string;
+  /** Only deals in open (not won/lost) stages — set by the "Past due" preset. */
+  openOnly: boolean;
 }
 
-export const EMPTY_DEAL_FILTERS: DealFilters = { search: "", owner: "all", closeFrom: "", closeTo: "", minValue: "" };
+export const EMPTY_DEAL_FILTERS: DealFilters = { search: "", owner: "all", closeFrom: "", closeTo: "", minValue: "", openOnly: false };
 
 export function hasActiveDealFilters(f: DealFilters): boolean {
-  return !!(f.search.trim() || f.owner !== "all" || f.closeFrom || f.closeTo || f.minValue.trim());
+  return !!(f.search.trim() || f.owner !== "all" || f.closeFrom || f.closeTo || f.minValue.trim() || f.openOnly);
 }
 
-/** Client-side filtering of a pipeline's deals (the board holds every deal of the pipeline). */
-export function filterDeals<T extends Deal>(deals: T[], f: DealFilters, currentUserId: string | null | undefined): T[] {
+type StageFlags = Pick<PipelineStage, "id" | "is_won" | "is_lost">;
+
+/** Ids of won/lost stages. */
+function closedStageIds(stages: StageFlags[]): Set<string> {
+  return new Set(stages.filter((s) => s.is_won || s.is_lost).map((s) => s.id));
+}
+
+/** Deals in open stages (deals whose stage is unknown count as open). */
+export function openDeals<T extends Pick<Deal, "stage_id">>(deals: T[], stages: StageFlags[]): T[] {
+  const closed = closedStageIds(stages);
+  return deals.filter((d) => !closed.has(d.stage_id));
+}
+
+/**
+ * Client-side filtering of a pipeline's deals (the board holds every deal of the pipeline).
+ * `stages` is needed for `openOnly`; without it that filter is ignored.
+ */
+export function filterDeals<T extends Deal>(deals: T[], f: DealFilters, currentUserId: string | null | undefined, stages?: StageFlags[]): T[] {
   const term = f.search.trim().toLowerCase();
   const min = f.minValue.trim() === "" ? null : Number(f.minValue);
   const ownerId = f.owner === "mine" ? currentUserId ?? "__none__" : f.owner === "all" ? null : f.owner;
+  const closed = f.openOnly && stages ? closedStageIds(stages) : null;
   return deals.filter((d) => {
+    if (closed?.has(d.stage_id)) return false;
     if (term) {
       const haystack = [d.title, d.companies?.name, d.contacts?.first_name, d.contacts?.last_name, d.contacts ? `${d.contacts.first_name} ${d.contacts.last_name}` : ""]
         .filter(Boolean)
@@ -59,6 +79,37 @@ export function summarizeDeals(deals: Pick<Deal, "value" | "probability">[]): St
     weighted += (v * Math.max(0, Math.min(100, Number(d.probability || 0)))) / 100;
   }
   return { count: deals.length, total, weighted };
+}
+
+/** Largest amount a deal value column (NUMERIC(14,2)) can hold. */
+export const MAX_DEAL_VALUE = 999_999_999_999.99;
+
+/** `error` is set when the input is invalid; otherwise `value` is the number, or `null` for a blank input. */
+export type ParsedNumber = { value: number | null; error: string | null };
+
+const invalid = (error: string): ParsedNumber => ({ value: null, error });
+
+/**
+ * Parses a typed money amount. Commas and spaces are treated as thousands separators
+ * ("1,500.50", "1 500"); blank parses to `null`. At most 2 decimals, 0 to MAX_DEAL_VALUE.
+ */
+export function parseDealValue(raw: string): ParsedNumber {
+  const s = raw.replace(/[,\s]/g, "");
+  if (s === "") return { value: null, error: null };
+  if (!/^(\d+(\.\d*)?|\.\d+)$/.test(s)) return invalid("Enter an amount of 0 or more, like 1,500.00");
+  if ((s.split(".")[1] ?? "").length > 2) return invalid("Use at most 2 decimal places");
+  const value = Number(s);
+  if (!Number.isFinite(value) || value > MAX_DEAL_VALUE) return invalid("Enter an amount up to 999,999,999,999.99");
+  return { value, error: null };
+}
+
+/** Parses a typed probability ("40", "40%"); blank parses to `null`. Rounded to a whole number, 0 to 100. */
+export function parseDealProbability(raw: string): ParsedNumber {
+  const s = raw.replace(/[\s%]/g, "");
+  if (s === "") return { value: null, error: null };
+  const n = /^(\d+(\.\d*)?|\.\d+)$/.test(s) ? Number(s) : NaN;
+  if (!Number.isFinite(n) || n > 100) return invalid("Enter a number from 0 to 100");
+  return { value: Math.round(n), error: null };
 }
 
 /** A deal is overdue when its close date is before today and it sits in an open (not won/lost) stage. */

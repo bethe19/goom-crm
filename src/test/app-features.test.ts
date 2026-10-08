@@ -11,6 +11,11 @@ import {
 } from "@/components/settings/validation";
 import { AiNotDeployedError, AiPlanLimitError, AiRateLimitError, aiErrorFromStatus } from "@/lib/ai";
 import { SELECTED_PLAN_KEY, clearSelectedPlan, readSelectedPlan, storeSelectedPlan } from "@/components/onboarding/selectedPlan";
+import { startOfDay } from "date-fns";
+import { parseQuickTask } from "@/components/tasks/taskUtils";
+import { patchTaskCache } from "@/hooks/useTasks";
+import { lastPageIndex, rangeNotSatisfiableTotal } from "@/lib/postgrest";
+import { contactFormSchema, isValidPhone } from "@/components/contacts/contactForm";
 
 describe("usageMeter", () => {
   it("formats used of limit and picks a tone", () => {
@@ -106,5 +111,68 @@ describe("selected plan from the pricing page", () => {
     expect(readSelectedPlan()).toBe("growth");
     clearSelectedPlan();
     expect(readSelectedPlan()).toBeNull();
+  });
+});
+
+describe("quick-add task parsing", () => {
+  const NOW = new Date(2026, 9, 7, 10, 30);
+  it("cuts the matched trailing date word, not an earlier occurrence", () => {
+    const t = parseQuickTask("Review today's numbers today", NOW);
+    expect(t.title).toBe("Review today's numbers");
+    expect(t.due_date).toBe(startOfDay(NOW).toISOString());
+  });
+  it("cuts the matched priority flag, not a lookalike earlier in the title", () => {
+    expect(parseQuickTask("Plan !highway trip !high", NOW)).toEqual({ title: "Plan !highway trip", due_date: null, priority: "high" });
+  });
+});
+
+describe("patchTaskCache", () => {
+  const task = { id: "t1", completed: false };
+  it("leaves non-object cache data (e.g. the sidebar's overdue count) untouched", () => {
+    expect(patchTaskCache(2, "t1", { completed: true })).toBe(2);
+    expect(patchTaskCache(undefined, "t1", { completed: true })).toBeUndefined();
+    expect(patchTaskCache(null, "t1", { completed: true })).toBeNull();
+  });
+  it("patches lists, infinite pages and single tasks", () => {
+    expect(patchTaskCache([task, { id: "t2", completed: false }], "t1", { completed: true })).toEqual([
+      { id: "t1", completed: true },
+      { id: "t2", completed: false },
+    ]);
+    const infinite = { pages: [{ rows: [task], count: 1, from: 0 }], pageParams: [0] };
+    expect(patchTaskCache(infinite, "t1", { completed: true })).toEqual({ pages: [{ rows: [{ id: "t1", completed: true }], count: 1, from: 0 }], pageParams: [0] });
+    expect(patchTaskCache(task, "t1", { completed: true })).toEqual({ id: "t1", completed: true });
+    expect(patchTaskCache(task, "other", { completed: true })).toBe(task);
+  });
+});
+
+describe("out-of-range pages", () => {
+  it("reads the total from PostgREST's PGRST103 error", () => {
+    const err = { code: "PGRST103", message: "Requested range not satisfiable", details: "An offset of 50 was requested, but there are only 12 rows." };
+    expect(rangeNotSatisfiableTotal(err)).toBe(12);
+    expect(rangeNotSatisfiableTotal({ code: "PGRST103", details: null })).toBe(0);
+    expect(rangeNotSatisfiableTotal({ code: "42501", message: "permission denied" })).toBeNull();
+    expect(rangeNotSatisfiableTotal(null)).toBeNull();
+  });
+  it("finds the last page that has rows", () => {
+    expect(lastPageIndex(0, 50)).toBe(0);
+    expect(lastPageIndex(12, 50)).toBe(0);
+    expect(lastPageIndex(50, 50)).toBe(0);
+    expect(lastPageIndex(51, 50)).toBe(1);
+  });
+});
+
+describe("contact phone validation", () => {
+  it.each(["+1 (555) 123-4567", "555.123.4567", "020 7946 0958 x12", "12345"])("accepts %s", (phone) => {
+    expect(isValidPhone(phone)).toBe(true);
+  });
+  it.each(["call me", "1234", "555-CALL-NOW", "+1 555 123 4567; DROP"])("rejects %s", (phone) => {
+    expect(isValidPhone(phone)).toBe(false);
+  });
+  it("shows a friendly message and allows a blank phone", () => {
+    const base = { first_name: "Ada", last_name: "", email: "", position: "", tags: "", company: null };
+    expect(contactFormSchema.safeParse({ ...base, phone: "" }).success).toBe(true);
+    const bad = contactFormSchema.safeParse({ ...base, phone: "abc" });
+    expect(bad.success).toBe(false);
+    expect(bad.error?.issues[0]?.message).toBe("Enter a valid phone number");
   });
 });

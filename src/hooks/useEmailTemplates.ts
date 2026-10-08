@@ -14,7 +14,7 @@ export interface EmailTemplate {
 
 const templatesKey = ["email-templates"] as const;
 
-/** Email templates of the current workspace (RLS-scoped), sorted by name. */
+/** The signed-in user's own email templates in the current workspace (personal, RLS-scoped), sorted by name. */
 export function useEmailTemplates() {
   const { user, organization } = useAuth();
   return useQuery({

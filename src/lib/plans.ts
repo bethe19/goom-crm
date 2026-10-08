@@ -26,7 +26,7 @@ export interface PlanLimits {
 export interface Plan {
   id: PlanId;
   name: string;
-  /** Planned monthly price per workspace in USD (billing isn't live during the beta). */
+  /** Monthly price per workspace in USD once the free trial ends (paid by invoice or bank transfer). */
   price: number;
   tagline: string;
   limits: PlanLimits;
@@ -85,6 +85,18 @@ export const PLANS: Record<PlanId, Plan> = {
 };
 
 export const PLAN_ORDER: PlanId[] = ["starter", "growth", "enterprise"];
+
+/** Length of the free trial every new workspace starts with (`organizations.trial_ends_at` default). */
+export const TRIAL_DAYS = 14;
+
+/** Plan new workspaces trial by default. */
+export const TRIAL_DEFAULT_PLAN: PlanId = "growth";
+
+/**
+ * AI assistant requests a month while a workspace is on its free trial, whatever the plan
+ * (`consume_ai_quota` caps trials at LEAST(plan limit, 100)).
+ */
+export const TRIAL_AI_REQUESTS_PER_MONTH = 100;
 
 export const FEATURE_LABELS: Record<PlanFeature, string> = {
   forecast: "Revenue forecast",

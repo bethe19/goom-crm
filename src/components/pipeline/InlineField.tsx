@@ -72,6 +72,10 @@ interface InlineFieldProps {
 /**
  * Click-to-edit text/number/date field. Enter or blur saves (only when changed), Esc cancels.
  * On error the input stays open with the user's text.
+ *
+ * While editing, the wrapper carries `data-inline-editing`: a surrounding sheet/dialog should ignore
+ * Escape coming from inside it (Radix listens on the document in the capture phase, so the input
+ * can't stop it), e.g. `onEscapeKeyDown` → `preventDefault()` when the target is inside `[data-inline-editing]`.
  */
 export function InlineField({
   id,
@@ -92,18 +96,22 @@ export function InlineField({
   const [error, setError] = useState<string | null>(null);
   const { status, run } = useSaveStatus();
   const cancelled = useRef(false);
+  // The value when editing started: blurring without typing must not write it back over a teammate's newer change.
+  const baseline = useRef(value);
 
   useEffect(() => {
     if (!editing) setDraft(value);
   }, [value, editing]);
+
+  const normalize = (v: string) => (type === "text" ? v.trim() : v);
 
   const commit = async () => {
     if (cancelled.current) {
       cancelled.current = false;
       return;
     }
-    const next = type === "text" ? draft.trim() : draft;
-    if (next === value) {
+    const next = normalize(draft);
+    if (next === value || next === normalize(baseline.current)) {
       setEditing(false);
       setError(null);
       return;
@@ -121,7 +129,7 @@ export function InlineField({
   return (
     <FieldShell label={label} htmlFor={id} status={status} className={className}>
       {editing ? (
-        <div>
+        <div data-inline-editing="">
           <Input
             id={id}
             type={type}
@@ -156,6 +164,8 @@ export function InlineField({
           type="button"
           onClick={() => {
             cancelled.current = false;
+            baseline.current = value;
+            setDraft(value);
             setEditing(true);
           }}
           className={cn(

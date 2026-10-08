@@ -2,11 +2,22 @@ import { Link } from "react-router-dom";
 import { ArrowUpRight, Lock, Gauge } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/contexts/AuthContext";
-import { FEATURE_LABELS, formatLimit, minimumPlanFor, type PlanFeature, type PlanLimits } from "@/lib/plans";
+import {
+  FEATURE_LABELS,
+  PLANS,
+  PLAN_ORDER,
+  TRIAL_AI_REQUESTS_PER_MONTH,
+  formatLimit,
+  minimumPlanFor,
+  type Plan,
+  type PlanFeature,
+  type PlanLimits,
+} from "@/lib/plans";
 import { usePlan } from "@/hooks/usePlan";
 import { cn } from "@/lib/utils";
+import { BILLING_PATH } from "./billing";
 
-export const BILLING_PATH = "/settings?tab=billing";
+export { BILLING_PATH };
 
 const FEATURE_BLURBS: Record<PlanFeature, string> = {
   forecast: "Project revenue against quota with a weighted forecast by month and owner.",
@@ -18,19 +29,36 @@ const FEATURE_BLURBS: Record<PlanFeature, string> = {
   priority_support: "Faster answers from the Goom team.",
 };
 
-/** The call to action shown in upgrade prompts: admins can switch the plan, others ask an admin. */
-function UpgradeAction({ planName, compact }: { planName: string; compact?: boolean }) {
-  const { can } = useAuth();
+/** The pending request when it already covers `plan` (the same or a bigger plan). */
+function coveringRequest(requested: Plan["id"] | null | undefined, plan: Plan): Plan | null {
+  return requested && PLAN_ORDER.indexOf(requested) >= PLAN_ORDER.indexOf(plan.id) ? PLANS[requested] : null;
+}
+
+/**
+ * The call to action shown in upgrade prompts. Admins on the trial switch plans in settings for
+ * free; once paid, upgrades are requested (they start after payment). Others ask an admin.
+ */
+function UpgradeAction({ plan, compact }: { plan: Plan; compact?: boolean }) {
+  const { can, organization } = useAuth();
   if (can("workspace.billing")) {
+    const requested = coveringRequest(organization?.requestedPlan, plan);
+    if (organization?.billingState === "active" && requested) {
+      return (
+        <p className="text-xs text-muted-foreground">
+          You've requested {requested.name}. It applies as soon as payment is confirmed.
+        </p>
+      );
+    }
+    const label = organization?.billingState === "active" ? "Request an upgrade" : `Switch to ${plan.name}`;
     return (
       <Button asChild size="sm" variant={compact ? "outline" : "default"} className="gap-1.5">
         <Link to={BILLING_PATH}>
-          Upgrade to {planName} <ArrowUpRight className="h-3.5 w-3.5" aria-hidden />
+          {label} <ArrowUpRight className="h-3.5 w-3.5" aria-hidden />
         </Link>
       </Button>
     );
   }
-  return <p className="text-xs text-muted-foreground">Ask your workspace admin to upgrade to {planName}.</p>;
+  return <p className="text-xs text-muted-foreground">Ask your workspace admin to upgrade to {plan.name}.</p>;
 }
 
 /**
@@ -60,7 +88,7 @@ export function UpgradePrompt({ feature, compact, className }: { feature: PlanFe
           </div>
         </div>
         <div className="shrink-0">
-          <UpgradeAction planName={plan.name} compact />
+          <UpgradeAction plan={plan} compact />
         </div>
       </div>
     );
@@ -81,7 +109,7 @@ export function UpgradePrompt({ feature, compact, className }: { feature: PlanFe
       </h3>
       <p className="mt-1 max-w-sm text-balance text-sm text-muted-foreground">{FEATURE_BLURBS[feature]}</p>
       <div className="mt-5">
-        <UpgradeAction planName={plan.name} />
+        <UpgradeAction plan={plan} />
       </div>
     </div>
   );
@@ -111,25 +139,32 @@ export function LimitNotice({
   /** Verb phrase for the message, e.g. "import these contacts". */
   action?: string;
 }) {
-  const { plan, wouldExceed, remaining } = usePlan();
+  const { plan, limits, billingState, wouldExceed, remaining } = usePlan();
   const { can } = useAuth();
   if (!wouldExceed(limit, count)) return null;
   const left = remaining(limit) ?? 0;
-  const max = plan.limits[limit];
+  const max = limits[limit];
+  const trialing = billingState === "trialing";
+  // Trials cap AI requests whatever the plan, so switching plans wouldn't help there.
+  const trialAiCap = trialing && limit === "ai_requests_per_month" && max === TRIAL_AI_REQUESTS_PER_MONTH;
 
   return (
     <div role="status" className={cn("flex items-start gap-2.5 rounded-lg border border-warning/30 bg-warning/10 p-3 text-sm", className)}>
       <Gauge className="mt-0.5 h-4 w-4 shrink-0 text-warning" aria-hidden />
       <div className="min-w-0 flex-1 space-y-1">
         <p className="font-medium">
-          Your {plan.name} plan includes {formatLimit(max)} {LIMIT_NOUNS[limit]}.
+          {trialAiCap
+            ? `Free trials include up to ${formatLimit(max)} ${LIMIT_NOUNS[limit]}.`
+            : `Your ${plan.name} ${trialing ? "trial" : "plan"} includes ${formatLimit(max)} ${LIMIT_NOUNS[limit]}.`}
         </p>
         <p className="text-xs text-muted-foreground">
           {left === 0 ? "You've reached the limit" : `Only ${formatLimit(left)} left`}
           {action ? `, so you can't ${action}` : ""}.{" "}
-          {can("workspace.billing") ? (
+          {trialAiCap ? (
+            `Your plan's full allowance of ${formatLimit(plan.limits[limit])} starts once it's paid.`
+          ) : can("workspace.billing") ? (
             <Link to={BILLING_PATH} className="font-medium text-foreground underline underline-offset-2">
-              Upgrade your plan
+              {trialing ? "Switch plans" : "Request an upgrade"}
             </Link>
           ) : (
             "Ask your workspace admin to upgrade."

@@ -8,13 +8,14 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { EmptyState, ErrorState } from "@/components/common/States";
+import { EmptyState } from "@/components/common/States";
 import { UpgradePrompt } from "@/components/settings/UpgradePrompt";
 import { KpiCard } from "@/components/dashboard/KpiCard";
-import { SectionCard } from "@/components/dashboard/ChartParts";
+import { AnalyticsErrorState, SectionCard } from "@/components/dashboard/ChartParts";
 import { ForecastChart } from "@/components/dashboard/ForecastChart";
 import { LockedPreview } from "@/components/dashboard/ReportCharts";
 import { ACCENT, VIZ_VARS, WON_COLOR } from "@/components/dashboard/chartTheme";
+import { useNow } from "@/hooks/useNow";
 import { formatCurrency, formatFriendlyDate, formatPercent } from "@/lib/formatters";
 import { cn } from "@/lib/utils";
 import {
@@ -62,8 +63,9 @@ function ForecastView() {
   const { organization, isAdmin, can } = useAuth();
   const navigate = useNavigate();
   const currency = organization?.currency || "ETB";
-  const quota = Number(organization?.monthly_quota ?? 0);
   const teamView = can("team.view_reports");
+  // The quota is a workspace-wide target; reps only see their own deals, so it applies to the team view only.
+  const quota = teamView ? Number(organization?.monthly_quota ?? 0) : 0;
   const [horizon, setHorizon] = useState<3 | 6>(6);
   const [tab, setTab] = useState<TabKey | null>(null);
 
@@ -71,7 +73,7 @@ function ForecastView() {
   const analytics = useWorkspaceAnalytics();
   const touches = useDealActivityTouches();
   const data = analytics.data;
-  const now = useMemo(() => new Date(), []);
+  const now = useNow();
 
   const forecast = useMemo(() => (data ? buildForecast(data.deals, data.stagesById, horizon, now) : null), [data, horizon, now]);
 
@@ -151,7 +153,7 @@ function ForecastView() {
       </div>
 
       {error ? (
-        <ErrorState error={error} onRetry={() => analytics.refetch()} title="Couldn't load the forecast" />
+        <AnalyticsErrorState error={error} onRetry={() => analytics.refetch()} title="Couldn't load the forecast" />
       ) : (
         <>
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -191,7 +193,7 @@ function ForecastView() {
 
           <SectionCard
             title="Forecast by close month"
-            description="Open deals stacked by confidence, with expected revenue and your monthly quota"
+            description={teamView ? "Open deals stacked by confidence, with expected revenue and your monthly quota" : "Your open deals stacked by confidence, with expected revenue"}
             table={
               forecast && forecast.totals.total + (forecast.months[0]?.won ?? 0) > 0
                 ? {
@@ -229,7 +231,7 @@ function ForecastView() {
             )}
           </SectionCard>
 
-          <QuotaMonths loading={loading} months={forecast?.months ?? []} quota={quota} currency={currency} isAdmin={isAdmin} />
+          {teamView && <QuotaMonths loading={loading} months={forecast?.months ?? []} quota={quota} currency={currency} isAdmin={isAdmin} />}
 
           <SectionCard title="Deals" description="Pick a month, or review deals that need attention" bodyClassName="px-0 pb-2 sm:px-0">
             {loading ? (

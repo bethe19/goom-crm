@@ -1,8 +1,10 @@
 import { useQuery, useMutation, useQueryClient, useInfiniteQuery, type QueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { assertAffected } from "@/components/settings/validation";
+import { useAuth } from "@/contexts/AuthContext";
 import { useEffect, useId } from "react";
 import { ilikeAny, PAGE_SIZE } from "@/lib/postgrest";
+import { chunk, fetchAllRows } from "@/lib/fetchAll";
 import type { TablesInsert } from "@/integrations/supabase/types";
 
 export type ActivityType = "call" | "email" | "meeting" | "note";
@@ -30,23 +32,37 @@ export function invalidateActivityQueries(queryClient: QueryClient) {
   }
 }
 
-/** Realtime invalidation with a channel name unique to this mount (fixed names collide across components). */
+const REALTIME_DEBOUNCE_MS = 500;
+
+/**
+ * Realtime invalidation for this workspace's activities, debounced so bursts (bulk deletes, imports)
+ * refetch once. The channel name is unique to this mount (fixed names collide across components).
+ */
 function useRealtimeActivities(enabled: boolean) {
   const queryClient = useQueryClient();
+  const { organization } = useAuth();
+  const orgId = organization?.id;
   const uid = useId();
   useEffect(() => {
-    if (!enabled) return;
-    const channel = supabase
-      .channel(`activities:${uid}:${Math.random().toString(36).slice(2, 8)}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "activities" }, () => {
+    if (!enabled || !orgId) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refresh = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
         queryClient.invalidateQueries({ queryKey: ["activities"] });
         queryClient.invalidateQueries({ queryKey: ["activities-feed"] });
-      })
+      }, REALTIME_DEBOUNCE_MS);
+    };
+    const channel = supabase
+      .channel(`activities:${orgId}:${uid}:${Math.random().toString(36).slice(2, 8)}`)
+      // The table has REPLICA IDENTITY FULL, so deletes carry organization_id and match this filter too.
+      .on("postgres_changes", { event: "*", schema: "public", table: "activities", filter: `organization_id=eq.${orgId}` }, refresh)
       .subscribe();
     return () => {
+      clearTimeout(timer);
       supabase.removeChannel(channel);
     };
-  }, [enabled, queryClient, uid]);
+  }, [enabled, orgId, queryClient, uid]);
 }
 
 export interface ActivityFilters {
@@ -143,16 +159,23 @@ export function useActivity(id: string | null | undefined) {
 export function useActivitiesBetween(fromIso: string, toIso: string, options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: ["calendar", "activities", fromIso, toIso],
-    queryFn: async (): Promise<Activity[]> => {
-      const { data, error } = await supabase
-        .from("activities")
-        .select("id, type, title, created_at, deal_id, contact_id")
-        .gte("created_at", fromIso)
-        .lte("created_at", toIso)
-        .order("created_at", { ascending: true })
-        .limit(1000);
-      if (error) throw error;
-      return (data ?? []) as Activity[];
+    queryFn: async ({ signal }): Promise<Activity[]> => {
+      // Paged so a busy range isn't silently cut off at Supabase's 1,000-row response cap. The count
+      // (first page only) lets paging stop without a final empty request.
+      const rows = await fetchAllRows(
+        (from, to) =>
+          supabase
+            .from("activities")
+            .select("id, type, title, created_at, deal_id, contact_id", from === 0 ? { count: "exact" } : undefined)
+            .gte("created_at", fromIso)
+            .lte("created_at", toIso)
+            .order("created_at", { ascending: true })
+            .order("id", { ascending: true })
+            .range(from, to)
+            .abortSignal(signal),
+        { signal },
+      );
+      return rows as Activity[];
     },
     enabled: options?.enabled ?? true,
   });
@@ -217,6 +240,41 @@ export function useDeleteActivity() {
     },
     onSuccess: (_d, id) => {
       queryClient.removeQueries({ queryKey: ["activity", id] });
+      invalidateActivityQueries(queryClient);
+    },
+  });
+}
+
+export interface BulkDeleteResult {
+  /** Ids the server actually deleted (rows the caller may not delete are skipped by RLS). */
+  deleted: string[];
+  /** The first error from a failed chunk, when some (but not all) chunks failed. */
+  error: unknown;
+}
+
+/**
+ * Deletes many activities with one `.in()` request per 100 ids and refreshes the lists once.
+ * Keeps going after a failed chunk; rejects only when nothing could be deleted.
+ */
+export function useBulkDeleteActivities() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (ids: string[]): Promise<BulkDeleteResult> => {
+      const deleted: string[] = [];
+      let firstError: unknown = null;
+      for (const part of chunk(ids, 100)) {
+        const { data, error } = await supabase.from("activities").delete({ count: "exact" }).in("id", part).select("id");
+        if (error) {
+          firstError ??= error;
+          continue;
+        }
+        deleted.push(...(data ?? []).map((r) => r.id));
+      }
+      if (firstError && deleted.length === 0) throw firstError;
+      return { deleted, error: firstError };
+    },
+    onSettled: (result) => {
+      result?.deleted.forEach((id) => queryClient.removeQueries({ queryKey: ["activity", id] }));
       invalidateActivityQueries(queryClient);
     },
   });

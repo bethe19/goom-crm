@@ -27,7 +27,10 @@ export function sanitizeHref(href: string): string {
   // eslint-disable-next-line no-control-regex
   const cleaned = href.replace(/[\u0000-\u001F\u007F\s]+/g, "");
   if (!cleaned) return "#";
-  if (/^(\/(?!\/)|#|\?)/.test(cleaned)) return cleaned;
+  if (/^[#?]/.test(cleaned)) return cleaned;
+  // Rooted path. Browsers treat "\" like "/", so "/\evil.com" (like "//evil.com") would be
+  // protocol-relative and leave the site: reject backslashes and a second leading slash.
+  if (cleaned.startsWith("/")) return cleaned.includes("\\") || cleaned.startsWith("//") ? "#" : cleaned;
   try {
     const url = new URL(cleaned);
     return SAFE_PROTOCOLS.has(url.protocol) ? url.href : "#";

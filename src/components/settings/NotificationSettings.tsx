@@ -7,11 +7,10 @@ import { Switch } from "@/components/ui/switch";
 import { SettingsSection } from "./shared";
 import { errorMessage } from "./validation";
 
+// Only switches the database triggers actually read (see NotificationPreferences).
 const OPTIONS: { key: keyof NotificationPreferences; label: string; description: string }[] = [
-  { key: "deal_stage_changes", label: "Deal stage changes", description: "When a deal you own moves to another stage." },
-  { key: "task_reminders", label: "Task reminders", description: "When a task assigned to you is due or overdue." },
-  { key: "mentions", label: "Mentions", description: "When a teammate mentions you in a note." },
-  { key: "weekly_digest", label: "Weekly digest", description: "A weekly email summary of your pipeline and tasks, once email delivery is set up for your workspace." },
+  { key: "task_reminders", label: "Task assignments", description: "When a teammate assigns a task to you." },
+  { key: "deal_stage_changes", label: "Deals won or lost", description: "When a deal you own is marked won or lost." },
 ];
 
 export function NotificationSettings() {

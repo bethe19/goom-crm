@@ -23,22 +23,24 @@ interface PipelineFiltersProps {
 const iso = (d: Date) => format(d, "yyyy-MM-dd");
 
 function closeLabel(f: DealFilters) {
-  if (!f.closeFrom && !f.closeTo) return "Close date";
+  const suffix = f.openOnly ? " · open" : "";
+  if (!f.closeFrom && !f.closeTo) return f.openOnly ? "Open deals" : "Close date";
   const fmt = (s: string) => format(new Date(`${s}T00:00:00`), "MMM d");
-  if (f.closeFrom && f.closeTo) return `${fmt(f.closeFrom)} – ${fmt(f.closeTo)}`;
-  return f.closeFrom ? `From ${fmt(f.closeFrom)}` : `Until ${fmt(f.closeTo)}`;
+  if (f.closeFrom && f.closeTo) return `${fmt(f.closeFrom)} – ${fmt(f.closeTo)}${suffix}`;
+  return (f.closeFrom ? `From ${fmt(f.closeFrom)}` : `Until ${fmt(f.closeTo)}`) + suffix;
 }
 
 export function PipelineFilters({ filters, onChange, onClear, members, currentUserId, currency = "ETB", className }: PipelineFiltersProps) {
   const now = new Date();
-  const presets: { label: string; from: string; to: string }[] = [
-    { label: "This month", from: iso(startOfMonth(now)), to: iso(endOfMonth(now)) },
-    { label: "Next 30 days", from: iso(now), to: iso(addDays(now, 30)) },
-    { label: "This quarter", from: iso(startOfQuarter(now)), to: iso(endOfQuarter(now)) },
-    { label: "Past due", from: "", to: iso(addDays(now, -1)) },
+  // "Past due" means open deals only: won and lost deals past their close date aren't late.
+  const presets: { label: string; from: string; to: string; openOnly: boolean }[] = [
+    { label: "This month", from: iso(startOfMonth(now)), to: iso(endOfMonth(now)), openOnly: false },
+    { label: "Next 30 days", from: iso(now), to: iso(addDays(now, 30)), openOnly: false },
+    { label: "This quarter", from: iso(startOfQuarter(now)), to: iso(endOfQuarter(now)), openOnly: false },
+    { label: "Past due", from: "", to: iso(addDays(now, -1)), openOnly: true },
   ];
   const active = hasActiveDealFilters(filters);
-  const dateActive = !!(filters.closeFrom || filters.closeTo);
+  const dateActive = !!(filters.closeFrom || filters.closeTo || filters.openOnly);
 
   return (
     <div className={cn("flex flex-wrap items-center gap-2", className)} role="search" aria-label="Filter deals">
@@ -103,13 +105,14 @@ export function PipelineFilters({ filters, onChange, onClear, members, currentUs
           </div>
           <div className="flex flex-wrap gap-1.5">
             {presets.map((p) => (
-              <Button key={p.label} variant="secondary" size="sm" className="h-7 px-2.5 text-xs" onClick={() => onChange({ closeFrom: p.from, closeTo: p.to })}>
+              <Button key={p.label} variant="secondary" size="sm" className="h-7 px-2.5 text-xs" onClick={() => onChange({ closeFrom: p.from, closeTo: p.to, openOnly: p.openOnly })}>
                 {p.label}
               </Button>
             ))}
           </div>
+          {filters.openOnly && <p className="text-xs text-muted-foreground">Showing open deals only.</p>}
           {dateActive && (
-            <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => onChange({ closeFrom: "", closeTo: "" })}>
+            <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => onChange({ closeFrom: "", closeTo: "", openOnly: false })}>
               Clear dates
             </Button>
           )}

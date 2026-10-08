@@ -6,7 +6,7 @@ import { toast } from "sonner";
 import { Camera, Loader2, Trash2 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/integrations/supabase/client";
-import { useMyProfile, useUpdateMyProfile } from "@/hooks/useMyProfile";
+import { AVATAR_BUCKET, avatarPath, removeAvatarFiles, useMyProfile, useUpdateMyProfile } from "@/hooks/useMyProfile";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -35,6 +35,7 @@ export function ProfileSettings() {
   const timezones = useMemo(() => listTimezones(), []);
   const fileInput = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
+  const [removing, setRemoving] = useState(false);
 
   const form = useForm<Values>({
     resolver: zodResolver(schema),
@@ -44,13 +45,18 @@ export function ProfileSettings() {
   const timezone = watch("timezone");
   const name = watch("full_name");
 
+  // The profile refetches (e.g. after a photo change or on window focus): refresh untouched fields but
+  // keep unsaved edits (and the dirty state that enables "Save changes").
   useEffect(() => {
     if (profile) {
-      reset({
-        full_name: profile.full_name ?? "",
-        job_title: profile.job_title ?? "",
-        timezone: profile.timezone ?? browserTimezone(),
-      });
+      reset(
+        {
+          full_name: profile.full_name ?? "",
+          job_title: profile.job_title ?? "",
+          timezone: profile.timezone ?? browserTimezone(),
+        },
+        { keepDirtyValues: true, keepDirty: true },
+      );
     }
   }, [profile, reset]);
 
@@ -82,14 +88,17 @@ export function ProfileSettings() {
     }
     setUploading(true);
     try {
-      const ext = file.type.split("/")[1] === "jpeg" ? "jpg" : file.type.split("/")[1];
-      const path = `${user.id}/avatar.${ext}`;
+      // One stable object per user (`<uid>/avatar.<ext>`), overwritten in place.
+      const path = avatarPath(user.id, file.type);
       const { error: uploadError } = await supabase.storage
-        .from("avatars")
+        .from(AVATAR_BUCKET)
         .upload(path, file, { upsert: true, contentType: file.type, cacheControl: "3600" });
       if (uploadError) throw uploadError;
-      const { data } = supabase.storage.from("avatars").getPublicUrl(path);
+      const { data } = supabase.storage.from(AVATAR_BUCKET).getPublicUrl(path);
+      // ?v= busts browser/CDN caches, since the URL is otherwise the same after every upload.
       await update.mutateAsync({ avatar_url: `${data.publicUrl}?v=${Date.now()}` });
+      // Best-effort: drop the previous photo if it had another extension (avatar.png → avatar.jpg).
+      await removeAvatarFiles(user.id, path).catch(() => undefined);
       toast.success("Photo updated");
     } catch (err) {
       toast.error(errorMessage(err));
@@ -99,11 +108,17 @@ export function ProfileSettings() {
   };
 
   const removeAvatar = async () => {
+    if (!user) return;
+    setRemoving(true);
     try {
+      // Delete the stored files first so the photo is really gone, then clear the link to it.
+      await removeAvatarFiles(user.id);
       await update.mutateAsync({ avatar_url: null });
       toast.success("Photo removed");
     } catch (err) {
       toast.error(errorMessage(err));
+    } finally {
+      setRemoving(false);
     }
   };
 
@@ -137,13 +152,20 @@ export function ProfileSettings() {
               aria-hidden
               onChange={onAvatarSelected}
             />
-            <Button type="button" variant="outline" size="sm" className="gap-1.5" disabled={uploading} onClick={() => fileInput.current?.click()}>
+            <Button type="button" variant="outline" size="sm" className="gap-1.5" disabled={uploading || removing} onClick={() => fileInput.current?.click()}>
               {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Camera className="h-4 w-4" />}
               {uploading ? "Uploading…" : "Upload photo"}
             </Button>
             {profile?.avatar_url && (
-              <Button type="button" variant="ghost" size="sm" className="gap-1.5" disabled={uploading || update.isPending} onClick={removeAvatar}>
-                <Trash2 className="h-4 w-4" /> Remove
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="gap-1.5"
+                disabled={uploading || removing || update.isPending}
+                onClick={removeAvatar}
+              >
+                {removing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />} Remove
               </Button>
             )}
           </div>

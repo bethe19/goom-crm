@@ -1,14 +1,28 @@
-User-agent: Googlebot
-Allow: /
-
-User-agent: Bingbot
-Allow: /
-
-User-agent: Twitterbot
-Allow: /
-
-User-agent: facebookexternalhit
-Allow: /
+# Marketing pages (/, /product, /solutions, /customers, /pricing, /contact, /terms, /privacy)
+# are crawlable. Sign-in, invitation links and the signed-in app are not.
+# Keep in sync with the routes in src/App.tsx. One group for every crawler: a crawler that
+# matches a named group ignores the "*" group, so don't add bot-specific groups without
+# repeating these rules.
 
 User-agent: *
 Allow: /
+
+# Auth and invitations
+Disallow: /auth
+Disallow: /invite/
+
+# Signed-in app
+Disallow: /app
+Disallow: /dashboard
+Disallow: /pipeline
+Disallow: /contacts
+Disallow: /companies
+Disallow: /activities
+Disallow: /tasks
+Disallow: /calendar
+Disallow: /forecast
+Disallow: /reports
+Disallow: /data
+Disallow: /settings
+Disallow: /admin
+Disallow: /platform

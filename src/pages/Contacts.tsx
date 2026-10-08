@@ -29,7 +29,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { PAGE_SIZE } from "@/lib/postgrest";
+import { PAGE_SIZE, lastPageIndex } from "@/lib/postgrest";
 import { downloadCsv } from "@/lib/csv";
 import { CONTACT_EXPORT_HEADERS, contactExportRow } from "@/lib/dataTransfer";
 import { formatDate, formatRelativeDate } from "@/lib/formatters";
@@ -85,9 +85,10 @@ export default function Contacts() {
   // Reset to the first page whenever the result set changes shape.
   useEffect(() => setPage(0), [debouncedSearch, tag, company?.id, sort, dir]);
 
-  // If the current page emptied (e.g. after deleting), step back.
+  // If the current page emptied (e.g. after deleting), step back to the last page that has rows.
   useEffect(() => {
-    if (!query.isPlaceholderData && query.data && query.data.rows.length === 0 && page > 0) setPage((p) => Math.max(0, p - 1));
+    if (query.isPlaceholderData || !query.data || query.data.rows.length > 0 || page === 0) return;
+    setPage(Math.min(page - 1, lastPageIndex(query.data.total)));
   }, [query.data, query.isPlaceholderData, page]);
 
   // ?new=1 and ?open=<id> deep links.
@@ -160,7 +161,13 @@ export default function Contacts() {
     if (!ok) return;
     try {
       const n = await bulkDelete.mutateAsync(allowed);
-      toast.success(`${n} ${n === 1 ? "contact" : "contacts"} deleted`);
+      if (n < allowed.length) {
+        toast.warning(`${n} of ${allowed.length} contacts deleted`, {
+          description: "The others may already have been deleted, or your role doesn't allow deleting them.",
+        });
+      } else {
+        toast.success(`${n} ${n === 1 ? "contact" : "contacts"} deleted`);
+      }
       clearSelection();
     } catch (err) {
       toast.error("Couldn't delete contacts", { description: errorMessage(err) });

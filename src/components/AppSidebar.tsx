@@ -1,5 +1,7 @@
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import { format, startOfDay } from "date-fns";
+import { toast } from "sonner";
 import { useTheme } from "next-themes";
 import type { LucideIcon } from "lucide-react";
 import {
@@ -7,6 +9,7 @@ import {
   BarChart3,
   Building2,
   CalendarDays,
+  Check,
   CheckSquare,
   ChevronsUpDown,
   Compass,
@@ -27,6 +30,8 @@ import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
 import { ROLE_LABELS } from "@/lib/permissions";
 import { useMyProfile } from "@/hooks/useMyProfile";
+import { useMyWorkspaces, useSwitchWorkspace, type MyWorkspace } from "@/hooks/useWorkspaces";
+import { errorMessage } from "@/components/settings/validation";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
   DropdownMenu,
@@ -114,10 +119,14 @@ function initials(name: string) {
   return ((parts[0]?.[0] ?? "") + (parts[1]?.[0] ?? "")).toUpperCase() || "?";
 }
 
-/** Open tasks past their due date that are assigned to or created by me. */
+/**
+ * My open tasks due before today (assigned to me, or created by me and unassigned), the same
+ * set the Tasks page shows as Overdue. Keyed by day so it rolls over at midnight.
+ */
 function useOverdueTaskCount(userId: string | undefined) {
+  const today = format(new Date(), "yyyy-MM-dd");
   return useQuery({
-    queryKey: ["tasks", "overdue-count", userId],
+    queryKey: ["tasks", "overdue-count", userId, today],
     enabled: !!userId,
     staleTime: 60_000,
     queryFn: async () => {
@@ -125,12 +134,18 @@ function useOverdueTaskCount(userId: string | undefined) {
         .from("tasks")
         .select("id", { count: "exact", head: true })
         .eq("completed", false)
-        .lt("due_date", new Date().toISOString())
-        .or(`assigned_to.eq.${userId},user_id.eq.${userId}`);
+        .lt("due_date", startOfDay(new Date()).toISOString())
+        .or(`assigned_to.eq.${userId},and(assigned_to.is.null,user_id.eq.${userId})`);
       if (error) return 0; // badge is a nicety; never break the nav over it
       return count ?? 0;
     },
   });
+}
+
+function workspaceNote(w: MyWorkspace): string | null {
+  if (w.suspended) return "Suspended";
+  if (w.billingState === "expired") return "Plan needed";
+  return null;
 }
 
 interface AppSidebarProps {
@@ -146,6 +161,27 @@ export function AppSidebar({ onOpenFeedback, onOpenShortcuts, onStartTour }: App
   const { theme = "system", setTheme } = useTheme();
   const { isMobile, setOpenMobile } = useSidebar();
   const { pathname } = useLocation();
+  const navigate = useNavigate();
+  const { data: workspaces = [] } = useMyWorkspaces();
+  const switchWorkspace = useSwitchWorkspace();
+
+  const handleSwitch = async (w: MyWorkspace) => {
+    if (w.id === organization?.id || switchWorkspace.isPending) return;
+    closeMobile();
+    try {
+      await switchWorkspace.mutateAsync(w.id);
+      navigate("/dashboard", { replace: true });
+      toast.success(`Switched to ${w.name}`);
+    } catch (err) {
+      toast.error(errorMessage(err));
+    }
+  };
+
+  const handleSignOut = async () => {
+    await signOut();
+    // Replace: the next person to sign in on this browser shouldn't land on this user's last page.
+    navigate("/auth", { replace: true });
+  };
 
   const closeMobile = () => {
     if (isMobile) setOpenMobile(false);
@@ -168,17 +204,63 @@ export function AppSidebar({ onOpenFeedback, onOpenShortcuts, onStartTour }: App
       <SidebarHeader className="p-2">
         <SidebarMenu>
           <SidebarMenuItem>
-            <SidebarMenuButton asChild size="lg" tooltip={workspaceName} className="gap-2.5">
-              <Link to="/dashboard" onClick={closeMobile}>
-                <span className="flex aspect-square size-8 shrink-0 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
-                  <GMark className="h-5 w-5" />
-                </span>
-                <span className="grid min-w-0 flex-1 text-left leading-tight">
-                  <span className="truncate text-sm font-semibold">{workspaceName}</span>
-                  <span className="truncate text-xs text-muted-foreground">Goom CRM</span>
-                </span>
-              </Link>
-            </SidebarMenuButton>
+            {workspaces.length > 1 ? (
+              <DropdownMenu modal={false}>
+                <DropdownMenuTrigger asChild>
+                  <SidebarMenuButton
+                    size="lg"
+                    tooltip={workspaceName}
+                    className="gap-2.5 data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
+                    aria-label={`Current workspace: ${workspaceName}. Switch workspace`}
+                  >
+                    <span className="flex aspect-square size-8 shrink-0 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
+                      <GMark className="h-5 w-5" />
+                    </span>
+                    <span className="grid min-w-0 flex-1 text-left leading-tight">
+                      <span className="truncate text-sm font-semibold">{workspaceName}</span>
+                      <span className="truncate text-xs text-muted-foreground">Switch workspace</span>
+                    </span>
+                    <ChevronsUpDown className="ml-auto !size-4 text-muted-foreground" aria-hidden="true" />
+                  </SidebarMenuButton>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent side={isMobile ? "bottom" : "right"} align="start" sideOffset={8} className="w-64">
+                  <DropdownMenuLabel className="text-xs font-medium text-muted-foreground">Workspaces</DropdownMenuLabel>
+                  {workspaces.map((w) => {
+                    const note = workspaceNote(w);
+                    const current = w.id === organization?.id;
+                    return (
+                      <DropdownMenuItem
+                        key={w.id}
+                        disabled={w.suspended || switchWorkspace.isPending}
+                        onSelect={() => void handleSwitch(w)}
+                        className="gap-2"
+                      >
+                        <span className="grid min-w-0 flex-1 leading-tight">
+                          <span className="truncate text-sm">{w.name}</span>
+                          <span className="truncate text-xs text-muted-foreground">
+                            {ROLE_LABELS[w.role]}
+                            {note ? ` · ${note}` : ""}
+                          </span>
+                        </span>
+                        {current && <Check className="h-4 w-4 shrink-0" aria-label="Current workspace" />}
+                      </DropdownMenuItem>
+                    );
+                  })}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : (
+              <SidebarMenuButton asChild size="lg" tooltip={workspaceName} className="gap-2.5">
+                <Link to="/dashboard" onClick={closeMobile}>
+                  <span className="flex aspect-square size-8 shrink-0 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
+                    <GMark className="h-5 w-5" />
+                  </span>
+                  <span className="grid min-w-0 flex-1 text-left leading-tight">
+                    <span className="truncate text-sm font-semibold">{workspaceName}</span>
+                    <span className="truncate text-xs text-muted-foreground">Goom CRM</span>
+                  </span>
+                </Link>
+              </SidebarMenuButton>
+            )}
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarHeader>
@@ -311,7 +393,7 @@ export function AppSidebar({ onOpenFeedback, onOpenShortcuts, onStartTour }: App
                   )}
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onSelect={() => void signOut()}>
+                <DropdownMenuItem onSelect={() => void handleSignOut()}>
                   <LogOut /> Sign out
                 </DropdownMenuItem>
               </DropdownMenuContent>

@@ -95,21 +95,48 @@ export type StagesById = Map<string, AnalyticsStage>;
 // ---------------------------------------------------------------------------------------------
 
 export const FETCH_ALL_PAGE_SIZE = 1000;
+export const FETCH_ALL_MAX_ROWS = 100_000;
+
+/** A query returned more rows than `fetchAll` loads. Thrown (never truncated) so no metric is silently wrong. */
+export class AnalyticsRowLimitError extends Error {
+  readonly limit: number;
+  constructor(limit: number) {
+    super(
+      `This workspace has more than ${limit.toLocaleString()} records for this view, which is more than analytics can load at once, so the numbers would be incomplete.`,
+    );
+    this.name = "AnalyticsRowLimitError";
+    this.limit = limit;
+  }
+}
+
+/** Retry like the app default (once), but not when the data is over the row limit: a retry can't help. */
+export function retryUnlessRowLimit(failureCount: number, error: unknown): boolean {
+  return !(error instanceof AnalyticsRowLimitError) && failureCount < 1;
+}
 
 /**
  * Loads every row of a query by walking `.range(from, to)` pages until a short page comes back.
- * `makePage` must apply a stable order (e.g. `.order("id")`) so pages don't overlap.
+ * `makePage` must apply a stable order (e.g. `.order("id")`) so pages don't overlap, and should
+ * pass `signal` to `.abortSignal()` so a cancelled query stops its in-flight request too.
+ * Throws AnalyticsRowLimitError past `maxRows` rows.
  */
 export async function fetchAll<T>(
   makePage: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: unknown }>,
-  pageSize = FETCH_ALL_PAGE_SIZE,
-  maxRows = 100_000,
+  { signal, pageSize = FETCH_ALL_PAGE_SIZE, maxRows = FETCH_ALL_MAX_ROWS }: { signal?: AbortSignal; pageSize?: number; maxRows?: number } = {},
 ): Promise<T[]> {
+  // TanStack Query aborts the signal when it cancels or restarts the query: stop paging.
+  // (Same as signal.throwIfAborted(), which older Safari and jsdom don't have.)
+  const checkAborted = () => {
+    if (signal?.aborted) throw signal.reason ?? new Error("Cancelled");
+  };
   const rows: T[] = [];
-  for (let from = 0; from < maxRows; from += pageSize) {
+  for (let from = 0; ; from += pageSize) {
+    checkAborted();
     const { data, error } = await makePage(from, from + pageSize - 1);
+    checkAborted();
     if (error) throw error;
     const page = data ?? [];
+    if (rows.length + page.length > maxRows) throw new AnalyticsRowLimitError(maxRows);
     rows.push(...page);
     if (page.length < pageSize) break;
   }
@@ -355,8 +382,9 @@ export function getPreviousPeriodRange(period: ReportPeriod, now = new Date()): 
   const cur = getPeriodRange(period, now);
   const shiftMonths = period === "this_month" || period === "last_month" ? 1 : period === "this_quarter" ? 3 : 12;
   const start = addMonths(cur.start, -shiftMonths);
-  let end = addMonths(cur.end, -shiftMonths);
-  // Month-to-date on the 31st vs a 30-day month: never spill into the current period.
+  // Shift today (not tomorrow) back, then include it: Oct 30 → through Sep 30, Mar 29 → through Feb 28.
+  let end = startOfDay(addDays(addMonths(startOfDay(now), -shiftMonths), 1));
+  // Never spill into the current period (e.g. the 31st vs a 30-day month, or "last month").
   if (end > cur.start) end = cur.start;
   return { start, end };
 }
@@ -1010,26 +1038,33 @@ type DealRow = Omit<AnalyticsDeal, "company_name" | "value"> & {
   companies: { name: string } | { name: string }[] | null;
 };
 
-async function loadWorkspaceAnalytics(): Promise<WorkspaceAnalytics> {
+/** `signal` is the query's: when TanStack cancels or restarts the query, paging stops mid-flight. */
+async function loadWorkspaceAnalytics(signal: AbortSignal): Promise<WorkspaceAnalytics> {
   const [pipelinesRes, stages, dealRows] = await Promise.all([
-    supabase.from("pipelines").select("id, name, created_at").order("created_at", { ascending: true }),
-    fetchAll<AnalyticsStage>((from, to) =>
-      supabase
-        .from("pipeline_stages")
-        .select("id, pipeline_id, name, color, position, probability, is_won, is_lost")
-        .order("position", { ascending: true })
-        .order("id", { ascending: true })
-        .range(from, to),
+    supabase.from("pipelines").select("id, name, created_at").order("created_at", { ascending: true }).abortSignal(signal),
+    fetchAll<AnalyticsStage>(
+      (from, to) =>
+        supabase
+          .from("pipeline_stages")
+          .select("id, pipeline_id, name, color, position, probability, is_won, is_lost")
+          .order("position", { ascending: true })
+          .order("id", { ascending: true })
+          .range(from, to)
+          .abortSignal(signal),
+      { signal },
     ),
-    fetchAll<DealRow>((from, to) =>
-      supabase
-        .from("deals")
-        .select(
-          "id, title, value, probability, stage_id, pipeline_id, owner_id, close_date, created_at, updated_at, won_at, lost_at, lost_reason, companies(name)",
-        )
-        .order("created_at", { ascending: true })
-        .order("id", { ascending: true })
-        .range(from, to),
+    fetchAll<DealRow>(
+      (from, to) =>
+        supabase
+          .from("deals")
+          .select(
+            "id, title, value, probability, stage_id, pipeline_id, owner_id, close_date, created_at, updated_at, won_at, lost_at, lost_reason, companies(name)",
+          )
+          .order("created_at", { ascending: true })
+          .order("id", { ascending: true })
+          .range(from, to)
+          .abortSignal(signal),
+      { signal },
     ),
   ]);
   if (pipelinesRes.error) throw pipelinesRes.error;
@@ -1063,8 +1098,9 @@ export function useWorkspaceAnalytics() {
   const { organization } = useAuth();
   return useQuery({
     queryKey: ["analytics", "workspace", organization?.id],
-    queryFn: loadWorkspaceAnalytics,
+    queryFn: ({ signal }) => loadWorkspaceAnalytics(signal),
     enabled: !!organization?.id,
+    retry: retryUnlessRowLimit,
   });
 }
 
@@ -1075,18 +1111,22 @@ export function useAnalyticsActivities(range: DateRange, enabled = true) {
   const end = range.end.toISOString();
   return useQuery({
     queryKey: ["analytics", "activities", organization?.id, start, end],
-    queryFn: () =>
-      fetchAll<AnalyticsActivity>((from, to) =>
-        supabase
-          .from("activities")
-          .select("id, type, created_at, user_id, deal_id")
-          .gte("created_at", start)
-          .lt("created_at", end)
-          .order("created_at", { ascending: true })
-          .order("id", { ascending: true })
-          .range(from, to),
+    queryFn: ({ signal }) =>
+      fetchAll<AnalyticsActivity>(
+        (from, to) =>
+          supabase
+            .from("activities")
+            .select("id, type, created_at, user_id, deal_id")
+            .gte("created_at", start)
+            .lt("created_at", end)
+            .order("created_at", { ascending: true })
+            .order("id", { ascending: true })
+            .range(from, to)
+            .abortSignal(signal),
+        { signal },
       ),
     enabled: enabled && !!organization?.id,
+    retry: retryUnlessRowLimit,
   });
 }
 
@@ -1101,15 +1141,19 @@ export function useStageHistory(enabled: boolean) {
     queryKey: ["analytics", "stage-history", organization?.id],
     enabled: enabled && !!organization?.id,
     staleTime: 60_000,
-    queryFn: () =>
-      fetchAll<StageAuditRow>((from, to) =>
-        supabase
-          .from("deal_audit_log")
-          .select("deal_id, old_value, new_value, created_at")
-          .eq("field", "stage_id")
-          .order("created_at", { ascending: true })
-          .order("id", { ascending: true })
-          .range(from, to),
+    retry: retryUnlessRowLimit,
+    queryFn: ({ signal }) =>
+      fetchAll<StageAuditRow>(
+        (from, to) =>
+          supabase
+            .from("deal_audit_log")
+            .select("deal_id, old_value, new_value, created_at")
+            .eq("field", "stage_id")
+            .order("created_at", { ascending: true })
+            .order("id", { ascending: true })
+            .range(from, to)
+            .abortSignal(signal),
+        { signal },
       ),
   });
 }
@@ -1122,17 +1166,21 @@ export function useDealActivityTouches(enabled = true) {
     queryKey: ["analytics", "deal-touches", organization?.id, day],
     enabled: enabled && !!organization?.id,
     staleTime: 5 * 60_000,
-    queryFn: async () => {
+    retry: retryUnlessRowLimit,
+    queryFn: async ({ signal }) => {
       const since = subDays(startOfDay(new Date()), TOUCH_LOOKBACK_DAYS).toISOString();
-      const rows = await fetchAll<{ deal_id: string | null; created_at: string }>((from, to) =>
-        supabase
-          .from("activities")
-          .select("deal_id, created_at")
-          .not("deal_id", "is", null)
-          .gte("created_at", since)
-          .order("created_at", { ascending: true })
-          .order("id", { ascending: true })
-          .range(from, to),
+      const rows = await fetchAll<{ deal_id: string | null; created_at: string }>(
+        (from, to) =>
+          supabase
+            .from("activities")
+            .select("deal_id, created_at")
+            .not("deal_id", "is", null)
+            .gte("created_at", since)
+            .order("created_at", { ascending: true })
+            .order("id", { ascending: true })
+            .range(from, to)
+            .abortSignal(signal),
+        { signal },
       );
       return lastActivityByDeal(rows);
     },
@@ -1154,22 +1202,35 @@ export function useWorkspaceMembers() {
   });
 }
 
-/** Keeps analytics fresh while a dashboard/report is open: refetch when deals change anywhere. */
+/** Quiet period after the last deal change before analytics reload (a bulk import is one reload). */
+export const ANALYTICS_REALTIME_DEBOUNCE_MS = 1500;
+
+/**
+ * Keeps analytics fresh while a dashboard/report is open: refetch when deals change anywhere.
+ * No row filter on purpose: Realtime can't filter DELETE events, so a filtered channel would miss
+ * deletions. Events are debounced so bursts (bulk import, other workspaces' deletes) reload once.
+ */
 export function useAnalyticsRealtime() {
   const queryClient = useQueryClient();
   const { organization } = useAuth();
+  const orgId = organization?.id;
   useEffect(() => {
-    if (!organization?.id) return;
+    if (!orgId) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const channel = supabase
-      .channel(`analytics-deals-${organization.id}-${Math.random().toString(36).slice(2)}`)
+      .channel(`analytics-deals-${orgId}-${Math.random().toString(36).slice(2)}`)
       .on("postgres_changes", { event: "*", schema: "public", table: "deals" }, () => {
-        queryClient.invalidateQueries({ queryKey: ["analytics", "workspace"] });
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          queryClient.invalidateQueries({ queryKey: ["analytics", "workspace", orgId] });
+        }, ANALYTICS_REALTIME_DEBOUNCE_MS);
       })
       .subscribe();
     return () => {
+      clearTimeout(timer);
       supabase.removeChannel(channel);
     };
-  }, [queryClient, organization?.id]);
+  }, [queryClient, orgId]);
 }
 
 export function findMember(members: WorkspaceMember[] | undefined, userId: string | null): WorkspaceMember | undefined {

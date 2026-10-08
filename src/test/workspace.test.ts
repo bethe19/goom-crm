@@ -34,6 +34,26 @@ describe("errorMessage", () => {
     expect(errorMessage(new Error("relation public.secret does not exist"))).toBe("Something went wrong. Please try again.");
     expect(errorMessage({ code: "42501", message: "new row violates policy" })).toMatch(/permission/);
   });
+
+  it("maps known Supabase Auth error codes before sanitizing", () => {
+    const auth = (code: string, message = "raw auth message", extra: Record<string, unknown> = {}) =>
+      errorMessage({ name: "AuthApiError", status: 422, code, message, ...extra });
+    expect(auth("email_exists")).toBe("An account with this email already exists.");
+    expect(auth("user_already_exists")).toMatch(/already exists.*signing in/);
+    expect(auth("email_address_invalid")).toMatch(/email address can't be used/);
+    expect(auth("same_password")).toMatch(/different from your current/);
+    expect(auth("weak_password")).toMatch(/too weak/);
+    expect(auth("weak_password", "Password is known to be weak", { reasons: ["pwned"] })).toMatch(/data breach/);
+    expect(auth("over_email_send_rate_limit")).toMatch(/Too many emails/);
+    expect(auth("over_request_rate_limit")).toMatch(/Too many requests/);
+    expect(auth("invalid_credentials")).toBe("Invalid email or password.");
+    expect(auth("email_not_confirmed")).toMatch(/confirm your email/);
+    expect(auth("reauthentication_needed")).toMatch(/confirm it's you/);
+    // Unknown codes still go through the sanitizer.
+    expect(auth("unexpected_failure", "pq: relation auth.users does not exist")).toBe("Something went wrong. Please try again.");
+    // Object.prototype keys are not codes.
+    expect(errorMessage({ code: "constructor", message: "x" })).toBe("Something went wrong. Please try again.");
+  });
 });
 
 describe("helpers", () => {

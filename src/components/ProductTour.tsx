@@ -35,7 +35,7 @@ const buildSteps = (): TourStep[] => [
   {
     anchor: "notifications",
     title: "Notifications",
-    body: "Deal updates, task reminders and mentions land here. Click one to open the record.",
+    body: "Deals assigned to you, deals won or lost, and tasks teammates assign you land here. Click one to open the record.",
   },
   {
     anchor: "user-menu",

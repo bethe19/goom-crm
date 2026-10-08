@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  activationEndsAt,
+  defaultActivationPlan,
   fillDailySeries,
   lastPage,
   normalizeOverview,
@@ -7,7 +9,11 @@ import {
   splitWorkspaces,
   summarizeSeries,
   toNumber,
+  toPlanIdOrNull,
   totalFromRows,
+  trialExtendedTo,
+  workspaceBillingBadge,
+  workspaceBillingState,
 } from "@/components/platform/platformUtils";
 
 describe("platform utils", () => {
@@ -66,5 +72,68 @@ describe("platform utils", () => {
   it("splits comma-separated workspace names", () => {
     expect(splitWorkspaces("Acme, Beta Co,,")).toEqual(["Acme", "Beta Co"]);
     expect(splitWorkspaces(null)).toEqual([]);
+  });
+
+  it("defaults the new billing counts in the overview", () => {
+    const o = normalizeOverview({ paying_workspaces: "3", plan_requests: 2 });
+    expect(o.paying_workspaces).toBe(3);
+    expect(o.plan_requests).toBe(2);
+    expect(o.trialing_workspaces).toBe(0);
+    expect(o.expired_workspaces).toBe(0);
+  });
+});
+
+describe("platform billing", () => {
+  const NOW = new Date(2026, 9, 7, 12);
+  const at = (month: number, day: number) => new Date(2026, month, day, 12).toISOString();
+
+  it("trusts a valid billing_state and otherwise derives it like the database", () => {
+    expect(workspaceBillingState("expired", at(9, 20), null, NOW)).toBe("expired");
+    expect(workspaceBillingState(null, at(9, 20), at(10, 1), NOW)).toBe("active");
+    expect(workspaceBillingState(undefined, at(9, 20), at(9, 1), NOW)).toBe("trialing");
+    expect(workspaceBillingState("bogus", at(9, 1), null, NOW)).toBe("expired");
+    expect(workspaceBillingState(null, null, null, NOW)).toBe("expired");
+  });
+
+  it("keeps only known requested plans", () => {
+    expect(toPlanIdOrNull("growth")).toBe("growth");
+    expect(toPlanIdOrNull("platinum")).toBeNull();
+    expect(toPlanIdOrNull(null)).toBeNull();
+  });
+
+  it("labels the billing badge", () => {
+    expect(workspaceBillingBadge({ billing_state: "trialing", trial_ends_at: at(9, 16), paid_until: null }, NOW)).toMatchObject({
+      label: "Trial · 9 days left",
+      attention: false,
+    });
+    expect(workspaceBillingBadge({ billing_state: "trialing", trial_ends_at: at(9, 9), paid_until: null }, NOW)).toMatchObject({
+      label: "Trial · 2 days left",
+      attention: true,
+    });
+    expect(workspaceBillingBadge({ billing_state: "active", trial_ends_at: null, paid_until: at(10, 7) }, NOW)).toMatchObject({
+      label: "Paid until Nov 7, 2026",
+      attention: false,
+    });
+    const expired = workspaceBillingBadge({ billing_state: "expired", trial_ends_at: at(8, 1), paid_until: at(9, 2) }, NOW);
+    expect(expired).toMatchObject({ label: "Expired", attention: true });
+    expect(expired.detail).toContain("Subscription ended Oct 2, 2026");
+  });
+
+  it("previews activation from the later of now and the current paid period", () => {
+    expect(activationEndsAt(null, 3, NOW)).toEqual(new Date(2027, 0, 7, 12));
+    expect(activationEndsAt(at(8, 1), 1, NOW)).toEqual(new Date(2026, 10, 7, 12));
+    expect(activationEndsAt(at(10, 7), 12, NOW)).toEqual(new Date(2027, 10, 7, 12));
+  });
+
+  it("previews a trial extension from the later of now and the trial end", () => {
+    expect(trialExtendedTo(at(9, 10), 7, NOW)).toEqual(new Date(2026, 9, 17, 12));
+    expect(trialExtendedTo(at(9, 1), 14, NOW)).toEqual(new Date(2026, 9, 21, 12));
+    expect(trialExtendedTo(null, 30, NOW)).toEqual(new Date(2026, 10, 6, 12));
+  });
+
+  it("preselects the requested plan, then the current one", () => {
+    expect(defaultActivationPlan({ requested_plan: "enterprise", plan: "starter" })).toBe("enterprise");
+    expect(defaultActivationPlan({ requested_plan: null, plan: "starter" })).toBe("starter");
+    expect(defaultActivationPlan({ requested_plan: null, plan: "legacy" })).toBe("growth");
   });
 });

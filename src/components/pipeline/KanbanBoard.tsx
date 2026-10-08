@@ -12,8 +12,11 @@ interface KanbanBoardProps {
   stageInfo: (deal: Deal) => { days: number | null; since: string | null };
   onDealClick: (deal: Deal) => void;
   onAddDeal: (stageId: string) => void;
-  /** Called for drag-and-drop and for the card's "Move to…" menu. The parent persists (optimistically). */
-  onDealMove: (deal: Deal, stage: PipelineStage) => void;
+  /**
+   * Called for drag-and-drop and for the card's "Move to…" menu. The parent persists (optimistically).
+   * `source` tells them apart (after a menu move, keyboard focus should follow the card).
+   */
+  onDealMove: (deal: Deal, stage: PipelineStage, source: "drag" | "menu") => void;
 }
 
 /**
@@ -35,10 +38,11 @@ export function KanbanBoard({ stages, deals, currency, ownerOf, stageInfo, onDea
       setDraggingId(null);
       const deal = deals.find((d) => d.id === dealId);
       if (!deal || deal.stage_id === stage.id) return;
-      onDealMove(deal, stage);
+      onDealMove(deal, stage, "drag");
     },
     [deals, onDealMove],
   );
+  const handleMenuMove = useCallback((deal: Deal, stage: PipelineStage) => onDealMove(deal, stage, "menu"), [onDealMove]);
 
   const handleDragStart = useCallback((deal: Deal) => setDraggingId(deal.id), []);
   const handleDragEnd = useCallback(() => setDraggingId(null), []);
@@ -61,7 +65,7 @@ export function KanbanBoard({ stages, deals, currency, ownerOf, stageInfo, onDea
           draggingId={draggingId}
           onDropDeal={handleDrop}
           onOpen={onDealClick}
-          onMove={onDealMove}
+          onMove={handleMenuMove}
           onAddDeal={onAddDeal}
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}

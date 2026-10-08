@@ -26,7 +26,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { PAGE_SIZE } from "@/lib/postgrest";
+import { PAGE_SIZE, lastPageIndex } from "@/lib/postgrest";
 import { downloadCsv } from "@/lib/csv";
 import { COMPANY_EXPORT_HEADERS, companyExportRow } from "@/lib/dataTransfer";
 import { formatCurrency, formatDate } from "@/lib/formatters";
@@ -81,8 +81,10 @@ export default function Companies() {
   const filtersActive = !!debouncedSearch.trim() || !!industry;
 
   useEffect(() => setPage(0), [debouncedSearch, industry, sort, dir]);
+  // If the current page emptied (e.g. after deleting), step back to the last page that has rows.
   useEffect(() => {
-    if (!query.isPlaceholderData && query.data && query.data.rows.length === 0 && page > 0) setPage((p) => Math.max(0, p - 1));
+    if (query.isPlaceholderData || !query.data || query.data.rows.length > 0 || page === 0) return;
+    setPage(Math.min(page - 1, lastPageIndex(query.data.total)));
   }, [query.data, query.isPlaceholderData, page]);
 
   useEffect(() => {
@@ -149,7 +151,13 @@ export default function Companies() {
     if (!ok) return;
     try {
       const n = await bulkDelete.mutateAsync(allowed);
-      toast.success(`${n} ${n === 1 ? "company" : "companies"} deleted`);
+      if (n < allowed.length) {
+        toast.warning(`${n} of ${allowed.length} companies deleted`, {
+          description: "The others may already have been deleted, or your role doesn't allow deleting them.",
+        });
+      } else {
+        toast.success(`${n} ${n === 1 ? "company" : "companies"} deleted`);
+      }
       clearSelection();
     } catch (err) {
       toast.error("Couldn't delete companies", { description: errorMessage(err) });

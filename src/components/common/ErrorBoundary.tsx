@@ -30,18 +30,28 @@ export class ErrorBoundary extends Component<Props, State> {
 
   render() {
     if (!this.state.error) return this.props.children;
+    // A route chunk from an older deploy: retrying the same import can't work, a reload can.
+    const stale = /dynamically imported module|Importing a module script failed|Unable to preload CSS|ChunkLoadError/i.test(
+      this.state.error.message,
+    );
     return (
       <div role="alert" className="flex min-h-[60vh] flex-col items-center justify-center px-6 text-center">
         <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-destructive/10 text-destructive">
           <AlertTriangle className="h-6 w-6" />
         </div>
-        <h2 className="text-lg font-semibold">Something went wrong on this page</h2>
+        <h2 className="text-lg font-semibold">{stale ? "A new version is available" : "Something went wrong on this page"}</h2>
         <p className="mt-1 max-w-md text-sm text-muted-foreground">
-          The rest of the app still works. Try reloading this view — if it keeps happening, let us know via Feedback.
+          {stale
+            ? "Goom was updated while this tab was open. Reload to continue."
+            : "Try again — if it keeps happening, let us know via Feedback."}
         </p>
         <div className="mt-6 flex gap-2">
-          <Button variant="outline" className="gap-1.5" onClick={() => this.setState({ error: null })}>
-            <RotateCw className="h-4 w-4" /> Try again
+          <Button
+            variant="outline"
+            className="gap-1.5"
+            onClick={() => (stale ? window.location.reload() : this.setState({ error: null }))}
+          >
+            <RotateCw className="h-4 w-4" /> {stale ? "Reload" : "Try again"}
           </Button>
           <Button className="gap-1.5" onClick={() => (window.location.href = "/dashboard")}>
             <Home className="h-4 w-4" /> Go to dashboard

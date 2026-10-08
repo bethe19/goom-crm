@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
 import { PLANS, type Plan, type PlanId, type PlanLimits } from "@/lib/plans";
+import { effectiveLimits } from "@/components/settings/billing";
 
 export interface WorkspaceUsage {
   members: number;
@@ -50,10 +51,13 @@ export function usePlan() {
   const { organization, hasFeature } = useAuth();
   const usage = useWorkspaceUsage();
   const plan: Plan = PLANS[organization?.plan ?? "starter"];
+  const billingState = organization?.billingState ?? "active";
+  /** Limits in force now: the plan's, except that trials cap AI requests (see effectiveLimits). */
+  const limits: PlanLimits = effectiveLimits(plan.id, billingState);
 
   /** Remaining capacity for a limit (null = unlimited, undefined = usage not loaded yet). */
   const remaining = (limit: UsageKey): number | null | undefined => {
-    const max = plan.limits[limit];
+    const max = limits[limit];
     if (max === null) return null;
     if (!usage.data) return undefined;
     return Math.max(0, max - usage.data[USAGE_FOR_LIMIT[limit]]);
@@ -65,16 +69,39 @@ export function usePlan() {
     return typeof left === "number" && left < count;
   };
 
-  return { plan, usage, hasFeature, remaining, wouldExceed };
+  return { plan, limits, billingState, usage, hasFeature, remaining, wouldExceed };
 }
 
-/** Admin-only plan switch (RPC `set_workspace_plan`). Blocked server-side if usage exceeds the target plan. */
+/**
+ * Admin-only plan switch (RPC `set_workspace_plan`): any plan during the trial, downgrades once
+ * paid (upgrades go through `useRequestPlan`). Blocked server-side if usage exceeds the target plan.
+ */
 export function useSetWorkspacePlan() {
   const { refreshUserRole } = useAuth();
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (plan: PlanId) => {
       const { error } = await supabase.rpc("set_workspace_plan", { p_plan: plan });
+      if (error) throw error;
+    },
+    onSuccess: async () => {
+      await refreshUserRole();
+      queryClient.invalidateQueries({ queryKey: ["workspace-usage"] });
+    },
+  });
+}
+
+/**
+ * Admin-only: ask the Goom team to activate (or upgrade to) a paid plan; `null` withdraws the
+ * request (RPC `request_plan`, works while the workspace is expired). There is no payment
+ * gateway: the operator emails payment details and activates the plan once paid.
+ */
+export function useRequestPlan() {
+  const { refreshUserRole } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (plan: PlanId | null) => {
+      const { error } = await supabase.rpc("request_plan", { p_plan: plan });
       if (error) throw error;
     },
     onSuccess: async () => {

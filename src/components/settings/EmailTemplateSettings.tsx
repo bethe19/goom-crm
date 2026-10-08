@@ -56,7 +56,7 @@ export function EmailTemplateSettings() {
   return (
     <SettingsSection
       title="Email templates"
-      description="Reusable emails you can insert when logging an email activity."
+      description="Reusable emails you can insert when logging an email activity. Only you can see your templates."
     >
       {templates.isLoading ? (
         <ListSkeleton rows={3} />
@@ -124,10 +124,28 @@ function TemplateDialog({ template, onClose }: { template: EmailTemplate | null;
   const { user } = useAuth();
   const create = useCreateEmailTemplate();
   const update = useUpdateEmailTemplate();
+  const confirm = useConfirm();
   const { register, handleSubmit, formState } = useForm<Values>({
     resolver: zodResolver(schema),
     defaultValues: { name: template?.name ?? "", subject: template?.subject ?? "", body: template?.body ?? "" },
   });
+  // Read during render so react-hook-form tracks it.
+  const { isDirty, isSubmitting } = formState;
+
+  // Escape, an outside click or the close button: don't silently throw away edits.
+  const requestClose = async () => {
+    if (isSubmitting) return;
+    if (isDirty) {
+      const ok = await confirm({
+        title: "Discard changes?",
+        description: "Your edits to this template haven't been saved.",
+        confirmLabel: "Discard",
+        cancelLabel: "Keep editing",
+      });
+      if (!ok) return;
+    }
+    onClose();
+  };
 
   const onSubmit = handleSubmit(async (values) => {
     try {
@@ -146,7 +164,12 @@ function TemplateDialog({ template, onClose }: { template: EmailTemplate | null;
   });
 
   return (
-    <Dialog open onOpenChange={(open) => !open && !formState.isSubmitting && onClose()}>
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) void requestClose();
+      }}
+    >
       <DialogContent className="sm:max-w-lg">
         <form onSubmit={onSubmit} noValidate className="space-y-4">
           <DialogHeader>

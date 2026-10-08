@@ -19,6 +19,8 @@ import { NotificationCenter } from "./NotificationCenter";
 import { BetaFeedbackDialog } from "./BetaFeedbackDialog";
 import { ProductTour } from "./ProductTour";
 import { FloatingAiCopilot } from "./dashboard/FloatingAiCopilot";
+import { TrialBanner } from "./billing/TrialBanner";
+import { TrialEndedScreen } from "./billing/TrialEndedScreen";
 
 function FullPageLoader() {
   return (
@@ -72,6 +74,7 @@ const WORKSPACE_ERROR_COPY: Record<ContextErrorKind, { title: string; body: stri
 
 function WorkspaceError({ message, kind }: { message: string; kind: ContextErrorKind }) {
   const { refreshUserRole, signOut } = useAuth();
+  const navigate = useNavigate();
   const [retrying, setRetrying] = useState(false);
   const copy = WORKSPACE_ERROR_COPY[kind];
   // Retrying won't lift a suspension; only offer it for transient/setup errors.
@@ -99,7 +102,13 @@ function WorkspaceError({ message, kind }: { message: string; kind: ContextError
           <p className="mt-2 font-mono [overflow-wrap:anywhere]">{message}</p>
         </details>
         <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-          <Button variant="outline" onClick={() => void signOut()}>
+          <Button
+            variant="outline"
+            onClick={async () => {
+              await signOut();
+              navigate("/auth", { replace: true });
+            }}
+          >
             <LogOut /> Sign out
           </Button>
           {canRetry ? (
@@ -123,8 +132,21 @@ function readSidebarCookie(): boolean {
   return !document.cookie.split("; ").includes("sidebar:state=false");
 }
 
+/** The platform console without the workspace shell (the operator's own workspace is unavailable). */
+function BarePlatformLayout() {
+  return (
+    <main className="mx-auto w-full max-w-7xl p-4 md:p-6 lg:p-8">
+      <ErrorBoundary>
+        <Suspense fallback={<PageSkeleton />}>
+          <Outlet />
+        </Suspense>
+      </ErrorBoundary>
+    </main>
+  );
+}
+
 export function AppLayout() {
-  const { session, loading, contextError, contextErrorKind } = useAuth();
+  const { session, loading, contextError, contextErrorKind, organization, isPlatformAdmin } = useAuth();
   const { data: onboardingStatus, isLoading: onboardingLoading } = useOnboardingStatus();
   const location = useLocation();
   const navigate = useNavigate();
@@ -134,8 +156,9 @@ export function AppLayout() {
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [tourSignal, setTourSignal] = useState(0);
 
+  const expired = organization?.billingState === "expired";
   const showOnboarding = !!onboardingStatus?.needsOnboarding && !onboardingDismissed;
-  const shellReady = !loading && !!session && !contextError && !onboardingLoading && !showOnboarding;
+  const shellReady = !loading && !!session && !contextError && !expired && !onboardingLoading && !showOnboarding;
 
   const openShortcuts = useCallback(() => setShortcutsOpen(true), []);
   const openFeedback = useCallback(() => setFeedbackOpen(true), []);
@@ -150,9 +173,18 @@ export function AppLayout() {
 
   if (loading) return <FullPageLoader />;
   if (!session) return <Navigate to="/auth" replace state={{ from: location }} />;
+  if ((contextError || expired) && isPlatformAdmin && location.pathname === "/platform") return <BarePlatformLayout />;
   if (contextError) return <WorkspaceError message={contextError} kind={contextErrorKind ?? "other"} />;
+  // Trial or subscription ended: the workspace's data is locked server-side until a plan is active.
+  if (expired) return <TrialEndedScreen />;
   if (onboardingLoading) return <FullPageLoader />;
-  if (showOnboarding) return <OnboardingWizard onComplete={() => setOnboardingDismissed(true)} />;
+  if (showOnboarding) {
+    return (
+      <ErrorBoundary>
+        <OnboardingWizard onComplete={() => setOnboardingDismissed(true)} />
+      </ErrorBoundary>
+    );
+  }
 
   return (
     <SidebarProvider defaultOpen={readSidebarCookie()}>
@@ -198,6 +230,7 @@ export function AppLayout() {
         </header>
 
         <main id="main-content" tabIndex={-1} className="mx-auto w-full min-w-0 max-w-7xl flex-1 p-4 md:p-6 lg:p-8">
+          <TrialBanner />
           <ErrorBoundary resetKey={location.pathname}>
             <Suspense fallback={<PageSkeleton />}>
               <Outlet />

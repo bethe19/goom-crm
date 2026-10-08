@@ -1,4 +1,5 @@
-import { Building2, MoreHorizontal, PauseCircle, PlayCircle, SearchX } from "lucide-react";
+import { useState } from "react";
+import { BadgeCheck, Building2, CalendarPlus, CircleSlash, MoreHorizontal, PauseCircle, PlayCircle, SearchX } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -20,7 +21,9 @@ import { useConfirm } from "@/components/common/ConfirmDialog";
 import { errorMessage } from "@/components/settings/validation";
 import { formatDate, formatNumber, formatRelativeDate } from "@/lib/formatters";
 import { isPlanId, PLAN_ORDER, PLANS, type PlanId } from "@/lib/plans";
+import { cn } from "@/lib/utils";
 import {
+  useEndPlatformSubscription,
   usePlatformWorkspaces,
   useSetPlatformWorkspacePlan,
   useSetPlatformWorkspaceStatus,
@@ -28,7 +31,9 @@ import {
 } from "@/hooks/usePlatform";
 import { Pagination, SearchField, TableFrame } from "./Pagination";
 import { useClampPage, usePagedList } from "./usePagedList";
-import { PlanBadge, WorkspaceStatusBadge } from "./badges";
+import { BillingStateBadge, PlanBadge, WorkspaceStatusBadge } from "./badges";
+import { ActivateWorkspaceDialog, ExtendTrialDialog } from "./BillingDialogs";
+import { workspaceBillingBadge } from "./platformUtils";
 
 export function WorkspacesTable() {
   const { searchInput, setSearchInput, search, page, setPage } = usePagedList();
@@ -71,11 +76,13 @@ export function WorkspacesTable() {
         )
       ) : (
         <TableFrame busy={query.isFetching}>
-          <Table className="min-w-[1080px]" aria-label="Workspaces">
+          <Table className="min-w-[1360px]" aria-label="Workspaces">
             <TableHeader>
               <TableRow>
                 <TableHead className="pl-4">Workspace</TableHead>
                 <TableHead>Plan</TableHead>
+                <TableHead>Billing</TableHead>
+                <TableHead>Plan request</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Owner</TableHead>
                 <TableHead className="text-right">Members</TableHead>
@@ -91,14 +98,43 @@ export function WorkspacesTable() {
             </TableHeader>
             <TableBody>
               {rows.map((w) => (
-                <TableRow key={w.id}>
-                  <TableCell className="max-w-[220px] pl-4 font-medium text-foreground">
+                <TableRow key={w.id} className={cn(w.requested_plan && "bg-warning/5 hover:bg-warning/10")}>
+                  <TableCell
+                    className={cn("max-w-[220px] pl-4 font-medium text-foreground", w.requested_plan && "border-l-2 border-l-warning")}
+                  >
                     <span className="block truncate" title={w.name}>
                       {w.name || "Untitled workspace"}
                     </span>
                   </TableCell>
                   <TableCell>
                     <PlanBadge plan={w.plan} />
+                  </TableCell>
+                  <TableCell className="whitespace-nowrap">
+                    <BillingStateBadge workspace={w} />
+                    {w.billing_state !== "active" && (
+                      <span className="mt-1 block text-xs text-muted-foreground">{workspaceBillingBadge(w).detail}</span>
+                    )}
+                  </TableCell>
+                  <TableCell className="whitespace-nowrap">
+                    {w.requested_plan ? (
+                      <div className="space-y-1">
+                        <span className="inline-flex items-center gap-1.5">
+                          <PlanBadge plan={w.requested_plan} />
+                          <span className="text-xs font-medium text-warning">Pending</span>
+                        </span>
+                        {w.plan_requested_at && (
+                          <time
+                            dateTime={w.plan_requested_at}
+                            title={formatDate(w.plan_requested_at)}
+                            className="block text-xs text-muted-foreground"
+                          >
+                            Requested {formatRelativeDate(w.plan_requested_at)}
+                          </time>
+                        )}
+                      </div>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
                   </TableCell>
                   <TableCell>
                     <WorkspaceStatusBadge status={w.status} />
@@ -146,9 +182,32 @@ function WorkspaceActions({ workspace }: { workspace: PlatformWorkspaceRow }) {
   const confirm = useConfirm();
   const setPlan = useSetPlatformWorkspacePlan();
   const setStatus = useSetPlatformWorkspaceStatus();
-  const busy = setPlan.isPending || setStatus.isPending;
+  const endSubscription = useEndPlatformSubscription();
+  const [dialog, setDialog] = useState<"activate" | "extend" | null>(null);
+  const busy = setPlan.isPending || setStatus.isPending || endSubscription.isPending;
   const name = workspace.name || "this workspace";
   const suspended = workspace.status === "suspended";
+  const paid = workspace.billing_state === "active";
+
+  const endPaidPeriod = async () => {
+    const trialLeft = !!workspace.trial_ends_at && Date.parse(workspace.trial_ends_at) > Date.now();
+    const ok = await confirm({
+      title: `End ${name}'s subscription now?`,
+      description: trialLeft
+        ? "The paid period ends immediately (for example after a refund). The workspace falls back to its free trial until that ends. Nothing is deleted."
+        : "The paid period ends immediately (for example after a refund). Members lose access to the workspace's data until it's activated again. Nothing is deleted.",
+      confirmLabel: "End subscription",
+      destructive: true,
+    });
+    if (!ok) return;
+    endSubscription.mutate(
+      { orgId: workspace.id },
+      {
+        onSuccess: () => toast.success(`${name}'s subscription ended`),
+        onError: (err) => toast.error(errorMessage(err)),
+      },
+    );
+  };
 
   const changePlan = async (next: string) => {
     if (!isPlanId(next) || next === workspace.plan) return;
@@ -197,38 +256,56 @@ function WorkspaceActions({ workspace }: { workspace: PlatformWorkspaceRow }) {
   };
 
   return (
-    <DropdownMenu modal={false}>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon-sm" loading={busy} aria-label={`Actions for ${name}`}>
-          <MoreHorizontal className="h-4 w-4" aria-hidden />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-52">
-        <DropdownMenuLabel className="truncate text-xs font-normal text-muted-foreground">{name}</DropdownMenuLabel>
-        <DropdownMenuSub>
-          <DropdownMenuSubTrigger>Change plan</DropdownMenuSubTrigger>
-          <DropdownMenuSubContent>
-            <DropdownMenuRadioGroup value={workspace.plan} onValueChange={(v) => void changePlan(v)}>
-              {PLAN_ORDER.map((id) => (
-                <DropdownMenuRadioItem key={id} value={id}>
-                  {PLANS[id].name}
-                </DropdownMenuRadioItem>
-              ))}
-            </DropdownMenuRadioGroup>
-          </DropdownMenuSubContent>
-        </DropdownMenuSub>
-        <DropdownMenuSeparator />
-        {suspended ? (
-          <DropdownMenuItem onSelect={() => void toggleStatus()}>
-            <PlayCircle className="mr-2 h-4 w-4" aria-hidden /> Reactivate workspace
+    <>
+      <DropdownMenu modal={false}>
+        <DropdownMenuTrigger asChild>
+          <Button variant="ghost" size="icon-sm" loading={busy} aria-label={`Actions for ${name}`}>
+            <MoreHorizontal className="h-4 w-4" aria-hidden />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-56">
+          <DropdownMenuLabel className="truncate text-xs font-normal text-muted-foreground">{name}</DropdownMenuLabel>
+          <DropdownMenuItem onSelect={() => setDialog("activate")}>
+            <BadgeCheck className="mr-2 h-4 w-4" aria-hidden /> {paid ? "Renew / activate…" : "Activate…"}
           </DropdownMenuItem>
-        ) : (
-          <DropdownMenuItem onSelect={() => void toggleStatus()} className="text-destructive focus:text-destructive">
-            <PauseCircle className="mr-2 h-4 w-4" aria-hidden /> Suspend workspace
-          </DropdownMenuItem>
-        )}
-      </DropdownMenuContent>
-    </DropdownMenu>
+          {!paid && (
+            <DropdownMenuItem onSelect={() => setDialog("extend")}>
+              <CalendarPlus className="mr-2 h-4 w-4" aria-hidden /> Extend trial…
+            </DropdownMenuItem>
+          )}
+          {paid && (
+            <DropdownMenuItem onSelect={() => void endPaidPeriod()} className="text-destructive focus:text-destructive">
+              <CircleSlash className="mr-2 h-4 w-4" aria-hidden /> End subscription
+            </DropdownMenuItem>
+          )}
+          <DropdownMenuSeparator />
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>Change plan</DropdownMenuSubTrigger>
+            <DropdownMenuSubContent>
+              <DropdownMenuRadioGroup value={workspace.plan} onValueChange={(v) => void changePlan(v)}>
+                {PLAN_ORDER.map((id) => (
+                  <DropdownMenuRadioItem key={id} value={id}>
+                    {PLANS[id].name}
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+          <DropdownMenuSeparator />
+          {suspended ? (
+            <DropdownMenuItem onSelect={() => void toggleStatus()}>
+              <PlayCircle className="mr-2 h-4 w-4" aria-hidden /> Reactivate workspace
+            </DropdownMenuItem>
+          ) : (
+            <DropdownMenuItem onSelect={() => void toggleStatus()} className="text-destructive focus:text-destructive">
+              <PauseCircle className="mr-2 h-4 w-4" aria-hidden /> Suspend workspace
+            </DropdownMenuItem>
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <ActivateWorkspaceDialog workspace={workspace} open={dialog === "activate"} onOpenChange={(o) => setDialog(o ? "activate" : null)} />
+      <ExtendTrialDialog workspace={workspace} open={dialog === "extend"} onOpenChange={(o) => setDialog(o ? "extend" : null)} />
+    </>
   );
 }
 

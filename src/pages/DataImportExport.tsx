@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -33,10 +33,11 @@ import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import { parseCsvObjects, downloadCsv } from "@/lib/csv";
+import { downloadCsv } from "@/lib/csv";
 import {
   downloadBrandedExcelTemplate,
   downloadBrandedCsvTemplate,
+  isTemplateSampleRow,
   parseImportSpreadsheet,
   exportToExcel,
   TEMPLATE_CONFIGS,
@@ -49,20 +50,24 @@ import { formatCurrency, formatNumber } from "@/lib/formatters";
 import { cn } from "@/lib/utils";
 import {
   IMPORT_FIELDS,
-  IMPORT_TEMPLATES,
   CONTACT_EXPORT_HEADERS,
   COMPANY_EXPORT_HEADERS,
   autoMapColumns,
+  checkDealStages,
   companyExportRow,
   contactExportRow,
   dedupeKey,
+  exportDate,
   failedRowsCsv,
+  inferDateOrder,
+  localeDateOrder,
   matchStage,
   missingRequiredFields,
   validateRows,
   type ColumnMapping,
   type CompanyImportValues,
   type ContactImportValues,
+  type DateOrder,
   type DealImportValues,
   type FailedRow,
   type ImportEntity,
@@ -73,6 +78,29 @@ const MAX_FILE_BYTES = 5 * 1024 * 1024;
 const MAX_ROWS = 25_000;
 const BATCH_SIZE = 100;
 const NONE = "__none__";
+const NO_STAGES: PipelineStage[] = [];
+
+/**
+ * Batch errors that would hit every row alike: network/timeouts (no error code), RLS (42501) and
+ * JWT/session (PGRST3xx). Retrying those row by row fires a request per row and, when only the
+ * response was lost, duplicates rows the batch actually saved.
+ */
+function isSystemicError(error: { code?: string | null }): boolean {
+  const code = error.code ?? "";
+  return !code || code === "42501" || code.startsWith("PGRST3");
+}
+
+/** Failure reasons after a systemic error: for the rows that were sent, and for the rows never sent. */
+function systemicFailure(error: { code?: string | null; message?: string }): { reason: string; rest: string } {
+  if (!error.code) {
+    return {
+      reason: "Connection lost – this batch may already be saved; check before re-importing these rows.",
+      rest: "Not imported: the import stopped after the connection was lost.",
+    };
+  }
+  const reason = errorMessage(error);
+  return { reason, rest: `Not imported: ${reason}` };
+}
 
 const ENTITIES: { value: ImportEntity; label: string; icon: LucideIcon; description: string }[] = [
   { value: "contacts", label: "Contacts", icon: Users, description: "People, linked to companies by name" },
@@ -151,6 +179,8 @@ type Step = "upload" | "map" | "preview" | "importing" | "done";
 interface ImportResult {
   created: number;
   skipped: number;
+  /** Template sample rows left in the file (not imported). */
+  samples: number;
   failed: FailedRow[];
   companiesCreated: number;
   stopped: boolean;
@@ -211,15 +241,34 @@ function ImportWizard() {
   const [previewFilter, setPreviewFilter] = useState<"all" | "problems">("all");
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [result, setResult] = useState<ImportResult | null>(null);
+  const [dateOrderChoice, setDateOrderChoice] = useState<DateOrder | null>(null);
 
   const { data: pipelines } = usePipelines({ enabled: entity === "deals" });
   const effectivePipelineId = pipelineId || pipelines?.[0]?.id || "";
-  const { data: stages = [] } = usePipelineStages(entity === "deals" ? effectivePipelineId || undefined : undefined);
+  const { data: stagesData } = usePipelineStages(entity === "deals" ? effectivePipelineId || undefined : undefined);
+  const stages = stagesData ?? NO_STAGES;
 
-  const validated = useMemo(() => (step === "preview" || step === "importing" ? validateRows(entity, rows, mapping) : []), [step, entity, rows, mapping]);
+  // One day/month order for the file's numeric dates (13/04 vs 04/13), not a guess per row; the
+  // user picks it when the values can't tell.
+  const dateGuess = useMemo(() => {
+    const cols = entity === "deals" ? [mapping.close_date, mapping.created_date].filter(Boolean) : [];
+    return inferDateOrder(cols.length ? rows.flatMap((r) => cols.map((h) => r[h] ?? "")) : [], localeDateOrder());
+  }, [entity, rows, mapping.close_date, mapping.created_date]);
+  const dateOrder = dateOrderChoice ?? dateGuess.order;
+
+  const checked = useMemo(() => {
+    if (step !== "preview" && step !== "importing") return { rows: [] as ValidatedRow[], unmatchedStages: 0, samples: new Set<number>() };
+    const base = validateRows(entity, rows, mapping, dateOrder);
+    const { rows: all, unmatchedStages } = entity === "deals" ? checkDealStages(base, stages) : { rows: base, unmatchedStages: 0 };
+    // The template's sample rows left in the file are skipped, not imported as real records.
+    const samples = new Set(all.filter((r) => !r.errors.length && isTemplateSampleRow(entity, r.raw, mapping)).map((r) => r.index));
+    return { rows: all, unmatchedStages, samples };
+  }, [step, entity, rows, mapping, dateOrder, stages]);
+  const validated = checked.rows;
   const invalidCount = validated.filter((r) => r.errors.length).length;
+  const sampleCount = checked.samples.size;
   const { wouldExceed } = usePlan();
-  const readyCount = validated.length - invalidCount;
+  const readyCount = validated.length - invalidCount - sampleCount;
   const contactLimitRisk = entity === "contacts" && readyCount > 0 && wouldExceed("contacts", readyCount);
   // With "skip duplicates" on, some rows may not be new, so only warn; otherwise block up front.
   const overContactLimit = contactLimitRisk && !skipDuplicates;
@@ -234,12 +283,24 @@ function ImportWizard() {
     setResult(null);
     setPreviewFilter("all");
     setProgress({ done: 0, total: 0 });
+    setDateOrderChoice(null);
   };
+
+  // Leaving mid-import abandons the remaining rows and the failed-rows report.
+  useEffect(() => {
+    if (step !== "importing") return;
+    const warn = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [step]);
 
   const handleFile = async (file: File | undefined) => {
     if (!file) return;
     const isSpreadsheet =
-      /\.(csv|xlsx|xls)$/i.test(file.name) ||
+      /\.(csv|tsv|txt|xlsx|xls)$/i.test(file.name) ||
       file.type === "text/csv" ||
       file.type.includes("spreadsheet") ||
       file.type.includes("excel");
@@ -256,13 +317,13 @@ function ImportWizard() {
     }
     setReading(true);
     try {
-      const parsed = await parseImportSpreadsheet(file);
+      const parsed = await parseImportSpreadsheet(file, { maxRows: MAX_ROWS });
       const cleanHeaders = parsed.headers.filter((h, i) => h !== "" && parsed.headers.indexOf(h) === i);
       if (!cleanHeaders.length || !parsed.rows.length) {
         toast.error("Nothing to import", { description: "The file needs a header row and at least one data row." });
         return;
       }
-      if (parsed.rows.length > MAX_ROWS) {
+      if (parsed.truncated || parsed.rows.length > MAX_ROWS) {
         toast.error("Too many rows", { description: `Import up to ${formatNumber(MAX_ROWS)} rows at a time.` });
         return;
       }
@@ -271,6 +332,7 @@ function ImportWizard() {
       setRows(parsed.rows);
       setMapping(autoMapColumns(cleanHeaders, entity));
       setResult(null);
+      setDateOrderChoice(null);
       setStep("map");
     } catch (err) {
       toast.error("Couldn't read that file", {
@@ -282,9 +344,13 @@ function ImportWizard() {
     }
   };
 
-  const handleDownloadExcel = () => {
-    downloadBrandedExcelTemplate(entity);
-    toast.success(`Downloaded ${TEMPLATE_CONFIGS[entity].title} Excel template (.xlsx)`);
+  const handleDownloadExcel = async () => {
+    try {
+      await downloadBrandedExcelTemplate(entity);
+      toast.success(`Downloaded ${TEMPLATE_CONFIGS[entity].title} Excel template (.xlsx)`);
+    } catch (err) {
+      toast.error("Couldn't create the Excel template", { description: errorMessage(err) });
+    }
   };
 
   const handleDownloadCsv = () => {
@@ -298,20 +364,29 @@ function ImportWizard() {
     stopRef.current = false;
     setStep("importing");
     const failed: FailedRow[] = [];
+    // Rows already accounted for (created, skipped or failed), so an unexpected error can still
+    // list every other row in the failed-rows report.
+    const handled = new Set<number>();
     let created = 0;
     let skipped = 0;
     let companiesCreated = 0;
-    const fail = (r: ValidatedRow, reason: string) => failed.push({ rowNumber: r.rowNumber, raw: r.raw, reason });
+    let stopped = false;
+    const samples = checked.samples.size;
+    const fail = (r: ValidatedRow, reason: string) => {
+      handled.add(r.index);
+      failed.push({ rowNumber: r.rowNumber, raw: r.raw, reason });
+    };
 
-    const all = validateRows(entity, rows, mapping);
-    all.filter((r) => r.errors.length).forEach((r) => fail(r, r.errors.join("; ")));
-    const valid = all.filter((r) => !r.errors.length);
-    setProgress({ done: 0, total: valid.length });
+    validated.filter((r) => r.errors.length).forEach((r) => fail(r, r.errors.join("; ")));
+    const valid = validated.filter((r) => !r.errors.length);
+    checked.samples.forEach((i) => handled.add(i));
+    const importable = valid.filter((r) => !checked.samples.has(r.index));
+    setProgress({ done: samples, total: valid.length });
 
     try {
       // --- Lookups -------------------------------------------------------------------
       const companyIds = new Map<string, string>();
-      const needsCompanies = entity === "companies" ? skipDuplicates : valid.some((r) => (r.values as ContactImportValues | DealImportValues).company);
+      const needsCompanies = entity === "companies" ? skipDuplicates : importable.some((r) => (r.values as ContactImportValues | DealImportValues).company);
       if (needsCompanies) {
         const existing = await fetchAllRows<{ id: string; name: string }>((from, to) =>
           supabase.from("companies").select("id, name").order("id").range(from, to),
@@ -320,7 +395,7 @@ function ImportWizard() {
       }
       const contactIds = new Map<string, string>();
       const needsContacts =
-        (entity === "contacts" && skipDuplicates) || (entity === "deals" && valid.some((r) => (r.values as DealImportValues).contact_email));
+        (entity === "contacts" && skipDuplicates) || (entity === "deals" && importable.some((r) => (r.values as DealImportValues).contact_email));
       if (needsContacts) {
         const existing = await fetchAllRows<{ id: string; email: string | null }>((from, to) =>
           supabase.from("contacts").select("id, email").not("email", "is", null).order("id").range(from, to),
@@ -329,14 +404,15 @@ function ImportWizard() {
       }
 
       // --- Duplicates ------------------------------------------------------------------
-      let toImport = valid;
+      let toImport = importable;
       if (skipDuplicates && entity !== "deals") {
         const seen = new Set<string>(entity === "companies" ? companyIds.keys() : contactIds.keys());
         toImport = [];
-        for (const r of valid) {
+        for (const r of importable) {
           const key = dedupeKey(entity, r.values);
           if (key && seen.has(key)) {
             skipped++;
+            handled.add(r.index);
             continue;
           }
           if (key) seen.add(key);
@@ -396,6 +472,9 @@ function ImportWizard() {
         items = toImport.map((row) => {
           const v = row.values as DealImportValues;
           const stage = matchStage(stages, v.stage) as PipelineStage;
+          // Won/lost deals keep their close date as won_at/lost_at (validation requires one), else the
+          // database stamps now and old wins count as this month's. Noon UTC keeps the calendar day.
+          const closedAt = v.close_date ? `${v.close_date}T12:00:00Z` : null;
           return {
             row,
             payload: {
@@ -410,58 +489,83 @@ function ImportWizard() {
               contact_id: v.contact_email ? (contactIds.get(v.contact_email) ?? null) : null,
               owner_id: user.id,
               created_by: user.id,
+              won_at: stage.is_won ? closedAt : null,
+              lost_at: stage.is_lost ? closedAt : null,
+              ...(v.created_date ? { created_at: `${v.created_date}T12:00:00Z` } : {}),
             },
           };
         });
       }
-      setProgress({ done: skipped, total: valid.length });
+      let done = skipped + samples;
+      setProgress({ done, total: valid.length });
 
-      // --- Insert in batches; on a batch error, retry row by row to pinpoint failures ---
-      let done = skipped;
-      let stopped = false;
-      // Once the plan's contact limit is hit, every remaining row would fail the same way.
-      let limitMessage: string | null = null;
+      // --- Insert in batches; on a row-level batch error, retry row by row to pinpoint failures ---
+      // Once the plan's contact limit is hit, or the connection/session fails, every remaining row
+      // would fail the same way, so the rest are reported as not imported.
+      let haltMessage: string | null = null;
       for (const batch of chunk(items, BATCH_SIZE)) {
-        if (stopRef.current || limitMessage) {
+        if (stopRef.current || haltMessage) {
           stopped = true;
-          batch.forEach((b) => fail(b.row, limitMessage ?? "Not imported (import stopped)"));
+          batch.forEach((b) => fail(b.row, haltMessage ?? "Not imported (import stopped)"));
           done += batch.length;
           setProgress({ done, total: valid.length });
           continue;
         }
-        const { error } = await supabase.from(table).insert(batch.map((b) => b.payload) as never);
+        // defaultToNull: false — rows without a created date get the column default even when other
+        // rows in the batch set created_at.
+        const { error } = await supabase.from(table).insert(batch.map((b) => b.payload) as never, { defaultToNull: false });
         if (!error) {
           created += batch.length;
+          batch.forEach((b) => handled.add(b.row.index));
+        } else if (isSystemicError(error)) {
+          const { reason, rest } = systemicFailure(error);
+          batch.forEach((b) => fail(b.row, reason));
+          haltMessage = rest;
         } else {
           for (const b of batch) {
-            if (limitMessage) {
-              fail(b.row, limitMessage);
+            if (haltMessage) {
+              fail(b.row, haltMessage);
               continue;
             }
             const { error: rowError } = await supabase.from(table).insert(b.payload as never);
-            if (rowError) {
-              if (isPlanLimitError(rowError)) limitMessage = errorMessage(rowError);
+            if (!rowError) {
+              created++;
+              handled.add(b.row.index);
+            } else if (isSystemicError(rowError)) {
+              const { reason, rest } = systemicFailure(rowError);
+              fail(b.row, reason);
+              haltMessage = rest;
+            } else {
+              if (isPlanLimitError(rowError)) haltMessage = errorMessage(rowError);
               fail(b.row, errorMessage(rowError));
-            } else created++;
+            }
           }
         }
+        if (haltMessage) stopped = true;
         done += batch.length;
         setProgress({ done, total: valid.length });
       }
 
-      setResult({ created, skipped, failed, companiesCreated, stopped });
+      setResult({ created, skipped, samples, failed, companiesCreated, stopped });
       setStep("done");
-      if (created > 0) toast.success(`Imported ${formatNumber(created)} ${entity}`);
+      if (haltMessage) {
+        toast.error(`Import stopped after ${formatNumber(created)} ${entity}`, { description: "Download the failed rows to see what wasn't imported." });
+      } else if (created > 0) toast.success(`Imported ${formatNumber(created)} ${entity}`);
       else toast.warning("Nothing was imported", { description: "Check the failed rows report for details." });
     } catch (err) {
       toast.error("Import failed", { description: errorMessage(err) });
-      // Rows already written stay; report what happened so far.
-      setResult({ created, skipped, failed, companiesCreated, stopped: true });
+      // Rows already written stay; every row not yet accounted for goes into the failed-rows report.
+      const reason = `Not imported: ${errorMessage(err)}`;
+      valid.forEach((r) => {
+        if (!handled.has(r.index)) fail(r, reason);
+      });
+      setResult({ created, skipped, samples, failed, companiesCreated, stopped: true });
       setStep("done");
     } finally {
       queryClient.invalidateQueries({ queryKey: ["contacts"] });
       queryClient.invalidateQueries({ queryKey: ["companies"] });
       queryClient.invalidateQueries({ queryKey: ["deals"] });
+      queryClient.invalidateQueries({ queryKey: ["analytics"] });
       queryClient.invalidateQueries({ queryKey: ["export-counts"] });
       queryClient.invalidateQueries({ queryKey: ["workspace-usage"] });
     }
@@ -684,8 +788,14 @@ function ImportWizard() {
             <div>
               <h2 className="text-sm font-semibold">Review</h2>
               <p className="text-sm text-muted-foreground tabular-nums">
-                {formatNumber(validated.length)} rows · <span className="text-foreground">{formatNumber(validated.length - invalidCount)} ready</span>
+                {formatNumber(validated.length)} rows · <span className="text-foreground">{formatNumber(readyCount)} ready</span>
                 {invalidCount > 0 && <span className="text-destructive"> · {formatNumber(invalidCount)} with problems (will be skipped)</span>}
+                {sampleCount > 0 && (
+                  <span className="text-warning">
+                    {" "}
+                    · {formatNumber(sampleCount)} template sample {sampleCount === 1 ? "row" : "rows"} (will be skipped)
+                  </span>
+                )}
               </p>
             </div>
             <ToggleGroup
@@ -798,11 +908,32 @@ function ImportWizard() {
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">Stages are matched by name; unmatched rows go to the first stage.</p>
+                {checked.unmatchedStages > 0 && (
+                  <p className="text-xs text-warning" role="status">
+                    {formatNumber(checked.unmatchedStages)} {checked.unmatchedStages === 1 ? "row has a stage" : "rows have a stage"} not in this pipeline;{" "}
+                    {checked.unmatchedStages === 1 ? "it'll" : "they'll"} go to {matchStage(stages, null)?.name}.
+                  </p>
+                )}
                 {pipelines && !pipelines.length && (
                   <p className="text-xs text-destructive">
                     No pipeline yet. <Link to="/pipeline" className="underline">Set one up first</Link>.
                   </p>
                 )}
+              </div>
+            )}
+            {entity === "deals" && dateGuess.ambiguous && (
+              <div className="max-w-xs space-y-1.5">
+                <Label htmlFor="opt-date-order">Date format</Label>
+                <Select value={dateOrder} onValueChange={(v) => setDateOrderChoice(v as DateOrder)} disabled={step === "importing"}>
+                  <SelectTrigger id="opt-date-order" className="h-9 text-sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="dmy">Day/Month/Year (31/12/2026)</SelectItem>
+                    <SelectItem value="mdy">Month/Day/Year (12/31/2026)</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">Dates like 05/04/2026 could be read either way. Check the preview.</p>
               </div>
             )}
           </div>
@@ -828,13 +959,13 @@ function ImportWizard() {
                 <Button
                   onClick={runImport}
                   disabled={
-                    validated.length - invalidCount === 0 ||
+                    readyCount === 0 ||
                     (entity === "deals" && (!effectivePipelineId || !stages.length)) ||
                     overContactLimit
                   }
                 >
                   <Upload className="mr-1.5 h-4 w-4" aria-hidden />
-                  Import {formatNumber(validated.length - invalidCount)} {entity}
+                  Import {formatNumber(readyCount)} {entity}
                 </Button>
               </>
             )}
@@ -871,6 +1002,11 @@ function ImportWizard() {
               </div>
             ))}
           </dl>
+          {result.samples > 0 && (
+            <p className="text-sm text-muted-foreground">
+              {formatNumber(result.samples)} template sample {result.samples === 1 ? "row was" : "rows were"} left out.
+            </p>
+          )}
           <div className="flex flex-wrap gap-2">
             {result.failed.length > 0 && (
               <Button variant="outline" onClick={downloadFailures}>
@@ -926,7 +1062,7 @@ const EXPORTS: Record<ExportEntity, { label: string; icon: LucideIcon; select: s
       d.contacts?.email ?? "",
       d.close_date ?? "",
       d.notes ?? "",
-      String(d.created_at).slice(0, 10),
+      exportDate(d.created_at),
     ],
   },
   activities: {
@@ -934,14 +1070,23 @@ const EXPORTS: Record<ExportEntity, { label: string; icon: LucideIcon; select: s
     icon: History,
     select: "*, contacts(first_name, last_name), deals(title)",
     headers: ["Type", "Title", "Description", "Contact", "Deal", "Created"],
-    toRow: (a) => [a.type, a.title, a.description ?? "", person(a.contacts), a.deals?.title ?? "", String(a.created_at).slice(0, 19).replace("T", " ")],
+    toRow: (a) => [a.type, a.title, a.description ?? "", person(a.contacts), a.deals?.title ?? "", exportDate(a.created_at, "yyyy-MM-dd HH:mm")],
   },
   tasks: {
     label: "Tasks",
     icon: CheckSquare,
     select: "*, contacts(first_name, last_name), deals(title)",
     headers: ["Title", "Description", "Due date", "Priority", "Completed", "Contact", "Deal", "Created"],
-    toRow: (t) => [t.title, t.description ?? "", t.due_date ?? "", t.priority ?? "", t.completed ? "Yes" : "No", person(t.contacts), t.deals?.title ?? "", String(t.created_at).slice(0, 10)],
+    toRow: (t) => [
+      t.title,
+      t.description ?? "",
+      exportDate(t.due_date, "yyyy-MM-dd HH:mm"),
+      t.priority ?? "",
+      t.completed ? "Yes" : "No",
+      person(t.contacts),
+      t.deals?.title ?? "",
+      exportDate(t.created_at),
+    ],
   },
 };
 
@@ -981,13 +1126,14 @@ function ExportCard({ entity, count, loadingCount, countError }: { entity: Expor
     setProgress({ loaded: 0, total: count ?? null });
     try {
       const rows = await fetchAllRows<Row>(
-        (from, to) => (supabase.from(entity).select(cfg.select, { count: "exact" }) as Row).order("id").range(from, to),
+        // Count once (first page) for the progress bar; counting on every page is wasted work.
+        (from, to) => (supabase.from(entity).select(cfg.select, from === 0 ? { count: "exact" } : undefined) as Row).order("id").range(from, to),
         { onProgress: (loaded, total) => setProgress({ loaded, total }) },
       );
       const rowData = rows.map(cfg.toRow);
-      const dateStr = new Date().toISOString().slice(0, 10);
+      const dateStr = exportDate(new Date().toISOString());
       if (format === "xlsx") {
-        exportToExcel(`Goom-CRM-${cfg.label}-${dateStr}.xlsx`, cfg.label, cfg.headers, rowData);
+        await exportToExcel(`Goom-CRM-${cfg.label}-${dateStr}.xlsx`, cfg.label, cfg.headers, rowData);
       } else {
         downloadCsv(`Goom-CRM-${cfg.label}-${dateStr}.csv`, cfg.headers, rowData);
       }

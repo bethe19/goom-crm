@@ -57,6 +57,25 @@ function getSafeStorage(): Storage | undefined {
   }
 }
 
+const authStorage = getSafeStorage();
+
+// The key supabase-js derives by default, so existing sessions survive.
+const AUTH_STORAGE_KEY = `sb-${new URL(SUPABASE_URL).hostname.split(".")[0]}-auth-token`;
+
+/**
+ * Removes the persisted session. supabase-js keeps it when the /logout request fails (offline,
+ * 5xx), which would sign the previous user back in on the next load.
+ */
+export function clearPersistedAuth(): void {
+  for (const suffix of ["", "-code-verifier", "-user"]) {
+    try {
+      authStorage?.removeItem(AUTH_STORAGE_KEY + suffix);
+    } catch {
+      // storage unavailable
+    }
+  }
+}
+
 // Import the supabase client like this:
 // import { supabase } from "@/integrations/supabase/client";
 
@@ -65,7 +84,8 @@ export const supabase = createClient<Database>(SUPABASE_URL, SUPABASE_PUBLISHABL
     fetch: createSupabaseFetch(SUPABASE_PUBLISHABLE_KEY),
   },
   auth: {
-    storage: getSafeStorage(),
+    storage: authStorage,
+    storageKey: AUTH_STORAGE_KEY,
     persistSession: true,
     autoRefreshToken: true,
   },

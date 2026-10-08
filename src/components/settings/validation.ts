@@ -24,17 +24,41 @@ export function passwordChecks(password: string) {
   ];
 }
 
+const BREACHED_PASSWORD_MESSAGE = "This password has appeared in a data breach. Please choose a different one.";
+
+/** Supabase Auth error codes (AuthApiError.code) → user-facing text. */
+const AUTH_ERROR_MESSAGES = new Map<string, string>([
+  ["email_exists", "An account with this email already exists."],
+  ["user_already_exists", "An account with this email already exists. Try signing in instead."],
+  ["email_address_invalid", "That email address can't be used. Check it for typos or try a different one."],
+  ["same_password", "Your new password must be different from your current one."],
+  ["weak_password", "That password is too weak. Use at least 8 characters with letters and numbers."],
+  ["over_email_send_rate_limit", "Too many emails have been sent to this address. Wait a few minutes and try again."],
+  ["over_request_rate_limit", "Too many requests. Wait a moment and try again."],
+  ["invalid_credentials", "Invalid email or password."],
+  ["email_not_confirmed", "Please confirm your email first — check your inbox for the confirmation link."],
+  ["reauthentication_needed", "For your security, confirm it's you again before making this change."],
+  ["captcha_failed", "The security check didn't pass or has expired. Complete it again and retry."],
+]);
+
 /**
  * User-facing text for an error from Supabase (auth, PostgREST, RPC or edge function).
- * Messages raised deliberately by our own database functions (`RAISE EXCEPTION` → SQLSTATE P0001),
- * e.g. "You can't remove the last admin", are written for users and shown as-is; everything else
- * goes through `sanitizeErrorMessage` so internals never leak.
+ * Known Supabase Auth error codes get a specific message. Messages raised deliberately by our own
+ * database functions (`RAISE EXCEPTION` → SQLSTATE P0001), e.g. "You can't remove the last admin",
+ * are written for users and shown as-is; everything else goes through `sanitizeErrorMessage` so
+ * internals never leak.
  */
 export function errorMessage(err: unknown): string {
   if (!err) return sanitizeErrorMessage(undefined);
   if (typeof err === "string") return sanitizeErrorMessage(err);
-  const e = err as { message?: unknown; code?: unknown };
+  const e = err as { message?: unknown; code?: unknown; reasons?: unknown };
   const message = typeof e.message === "string" ? e.message : undefined;
+  const authMessage = typeof e.code === "string" ? AUTH_ERROR_MESSAGES.get(e.code) : undefined;
+  if (authMessage) {
+    // AuthWeakPasswordError lists why: "pwned" means the password is in a known breach.
+    if (e.code === "weak_password" && Array.isArray(e.reasons) && e.reasons.includes("pwned")) return BREACHED_PASSWORD_MESSAGE;
+    return authMessage;
+  }
   if (e.code === "P0001" && message && message.length <= 240) return message;
   if (e.code === "42501" || isPermissionError(err)) return PERMISSION_DENIED_MESSAGE;
   // `.single()` after an update that RLS filtered out (or a record deleted meanwhile).

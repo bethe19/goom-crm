@@ -1,6 +1,18 @@
 import { describe, it, expect } from "vitest";
 import { groupTasks, parseQuickTask, taskBucket, dueDateToIso, isoToDueInputs, isTaskOverdue } from "@/components/tasks/taskUtils";
-import { filterDeals, summarizeDeals, sortDeals, isDealOverdue, daysSince, hasActiveDealFilters, EMPTY_DEAL_FILTERS, initials } from "@/components/pipeline/dealUtils";
+import {
+  filterDeals,
+  summarizeDeals,
+  sortDeals,
+  isDealOverdue,
+  daysSince,
+  hasActiveDealFilters,
+  EMPTY_DEAL_FILTERS,
+  initials,
+  openDeals,
+  parseDealValue,
+  parseDealProbability,
+} from "@/components/pipeline/dealUtils";
 import { groupByDay, dayLabel } from "@/components/activities/activityUtils";
 import { bucketByDay, monthGrid, parseCalendarDate, type CalendarItem } from "@/components/activities/calendarUtils";
 import { defaultProbabilityForStage, stageOutcome, type PipelineStage } from "@/hooks/usePipelineStages";
@@ -115,6 +127,51 @@ describe("deal filters", () => {
     expect(hasActiveDealFilters(EMPTY_DEAL_FILTERS)).toBe(false);
     expect(hasActiveDealFilters({ ...EMPTY_DEAL_FILTERS, search: "  " })).toBe(false);
     expect(hasActiveDealFilters({ ...EMPTY_DEAL_FILTERS, minValue: "0" })).toBe(true);
+    expect(hasActiveDealFilters({ ...EMPTY_DEAL_FILTERS, openOnly: true })).toBe(true);
+  });
+
+  it("'open only' (Past due) drops won and lost deals", () => {
+    const stages = [
+      { id: "open", is_won: false, is_lost: false },
+      { id: "won", is_won: true },
+      { id: "lost", is_lost: true },
+    ];
+    const ds = [
+      deal({ id: "a", stage_id: "open", close_date: "2026-09-20" }),
+      deal({ id: "b", stage_id: "won", close_date: "2026-09-20" }),
+      deal({ id: "c", stage_id: "lost", close_date: "2026-09-20" }),
+    ];
+    const pastDue = { ...EMPTY_DEAL_FILTERS, closeTo: "2026-09-25", openOnly: true };
+    expect(filterDeals(ds, pastDue, "me", stages).map((d) => d.id)).toEqual(["a"]);
+    expect(filterDeals(ds, { ...pastDue, openOnly: false }, "me", stages).map((d) => d.id)).toEqual(["a", "b", "c"]);
+    expect(openDeals(ds, stages).map((d) => d.id)).toEqual(["a"]);
+  });
+});
+
+describe("amount inputs", () => {
+  it("accepts thousands separators and blanks", () => {
+    expect(parseDealValue("1,500")).toEqual({ error: null, value: 1500 });
+    expect(parseDealValue(" 1 250 000.5 ")).toEqual({ error: null, value: 1250000.5 });
+    expect(parseDealValue("0")).toEqual({ error: null, value: 0 });
+    expect(parseDealValue(".75")).toEqual({ error: null, value: 0.75 });
+    expect(parseDealValue("")).toEqual({ error: null, value: null });
+  });
+
+  it("rejects negatives, junk, >2 decimals and values over NUMERIC(14,2)", () => {
+    expect(parseDealValue("-5").error).toBeTruthy();
+    expect(parseDealValue("1e5").error).toBeTruthy();
+    expect(parseDealValue("abc").error).toBeTruthy();
+    expect(parseDealValue("10.555").error).toBeTruthy();
+    expect(parseDealValue("999,999,999,999.99")).toEqual({ error: null, value: 999999999999.99 });
+    expect(parseDealValue("1,000,000,000,000").error).toBeTruthy();
+  });
+
+  it("parses probabilities from 0 to 100", () => {
+    expect(parseDealProbability("40")).toEqual({ error: null, value: 40 });
+    expect(parseDealProbability("33.6%")).toEqual({ error: null, value: 34 });
+    expect(parseDealProbability(" ")).toEqual({ error: null, value: null });
+    expect(parseDealProbability("101").error).toBeTruthy();
+    expect(parseDealProbability("-1").error).toBeTruthy();
   });
 });
 
@@ -164,6 +221,38 @@ describe("stage rules", () => {
     expect(stageMoveUpdates(stage({ id: "l", is_lost: true }), "  Price ")).toEqual({ stage_id: "l", probability: 0, lost_reason: "Price" });
     expect(stageMoveUpdates(stage({ id: "l", is_lost: true }), "")).toEqual({ stage_id: "l", probability: 0, lost_reason: null });
     expect(stageMoveUpdates(stage({ id: "o" }))).toEqual({ stage_id: "o" });
+  });
+
+  it("reopening a won/lost deal into a stage without a probability uses the stage default", () => {
+    expect(stageMoveUpdates(stage({ id: "o" }), null, { from: stage({ is_lost: true }) })).toEqual({ stage_id: "o", probability: 50 });
+    expect(stageMoveUpdates(stage({ id: "o" }), null, { from: stage({ is_won: true }) })).toEqual({ stage_id: "o", probability: 50 });
+    expect(stageMoveUpdates(stage({ id: "o", probability: 20 }), null, { from: stage({ is_lost: true }) })).toEqual({ stage_id: "o", probability: 20 });
+    // Open → open keeps the deal's own probability when the stage has none.
+    expect(stageMoveUpdates(stage({ id: "o" }), null, { from: stage({}) })).toEqual({ stage_id: "o" });
+  });
+
+  it("restore wins over stage-derived values (Undo)", () => {
+    // Undo of a move to Won puts back the deal's 35%, not the old stage's default.
+    expect(stageMoveUpdates(stage({ id: "n", probability: 75 }), null, { from: stage({ is_won: true }), restore: { probability: 35, lost_reason: null } })).toEqual({
+      stage_id: "n",
+      probability: 35,
+      lost_reason: null,
+    });
+    // Undo of a reopen puts back the original lost reason.
+    expect(stageMoveUpdates(stage({ id: "l", is_lost: true }), undefined, { restore: { probability: 0, lost_reason: "Price" } })).toEqual({
+      stage_id: "l",
+      probability: 0,
+      lost_reason: "Price",
+    });
+    expect(stageMoveUpdates(stage({ id: "o" }), null, { restore: {} })).toEqual({ stage_id: "o" });
+  });
+});
+
+describe("deal totals", () => {
+  it("open deals only: won and lost don't count toward pipeline totals", () => {
+    const stages = [{ id: "s1" }, { id: "w", is_won: true }, { id: "l", is_lost: true }];
+    const ds = [deal({ stage_id: "s1", value: 1000, probability: 50 }), deal({ stage_id: "w", value: 5000, probability: 100 }), deal({ stage_id: "l", value: 700, probability: 0 })];
+    expect(summarizeDeals(openDeals(ds, stages))).toEqual({ count: 1, total: 1000, weighted: 500 });
   });
 });
 

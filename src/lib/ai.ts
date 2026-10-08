@@ -81,6 +81,10 @@ export class AiAbortedError extends AiError {
 
 const FUNCTION_NOT_FOUND = /requested function was not found/i;
 
+/** The server may try a fallback model after a 30 s provider timeout; give up after that. */
+const REQUEST_TIMEOUT_MS = 75_000;
+const TIMED_OUT_MESSAGE = "The assistant took too long to answer. Please try again.";
+
 /** Server messages are written for users, but never show anything long or unexpected. */
 function safeServerMessage(text: string | undefined): string | undefined {
   const t = text?.trim();
@@ -100,6 +104,8 @@ export function aiErrorFromStatus(status: number | undefined, body: AiErrorBody 
   }
   if (status === 401) return new AiError("Your session has expired. Please sign in again.", 401);
   if (status === 403 && serverMessage) return new AiError(serverMessage, 403);
+  // e.g. "This conversation is too long for the assistant…": retrying the same request won't help.
+  if ((status === 400 || status === 413) && serverMessage) return new AiError(serverMessage, status);
   return new AiError("The assistant couldn't answer right now. Please try again.", status);
 }
 
@@ -135,9 +141,11 @@ export async function chat(messages: AiMessage[], opts: AiChatOptions = {}): Pro
     result = await supabase.functions.invoke<AiChatResponse>("ai-chat", {
       body: { messages, temperature, max_tokens },
       signal,
+      timeout: REQUEST_TIMEOUT_MS,
     });
   } catch (err) {
-    if (signal?.aborted || (err instanceof DOMException && err.name === "AbortError")) throw new AiAbortedError();
+    if (signal?.aborted) throw new AiAbortedError();
+    if (err instanceof DOMException && err.name === "AbortError") throw new AiError(TIMED_OUT_MESSAGE);
     throw new AiError("Couldn't reach the assistant. Check your connection and try again.");
   }
 
@@ -151,6 +159,8 @@ export async function chat(messages: AiMessage[], opts: AiChatOptions = {}): Pro
     }
     if (error instanceof FunctionsFetchError) {
       if (signal?.aborted) throw new AiAbortedError();
+      const cause = (error.context as { name?: string } | undefined)?.name;
+      if (cause === "AbortError") throw new AiError(TIMED_OUT_MESSAGE);
       throw new AiError("Couldn't reach the assistant. Check your connection and try again.");
     }
     if (error instanceof FunctionsRelayError) {
@@ -183,22 +193,15 @@ export interface AssistantContextInput {
   workspaceSummary: string;
 }
 
-/** Builds the system prompt. Keeps instructions short and forbids inventing data. */
+/**
+ * Builds the workspace context sent as the "system" message. The ai-chat function owns the
+ * assistant's instructions and treats this text as data, so it holds facts only.
+ */
 export function buildAssistantSystemPrompt(ctx: AssistantContextInput): string {
   const who = [ctx.userName, ctx.userRole ? `(${ctx.userRole})` : null].filter(Boolean).join(" ");
   return [
-    `You are the assistant inside a sales CRM. You help ${who || "the user"}${
-      ctx.workspaceName ? ` in the "${ctx.workspaceName}" workspace` : ""
-    } understand their pipeline and decide what to do next.`,
-    `Today is ${ctx.today}. Money is in ${ctx.currency}.`,
-    "",
-    "Rules:",
-    "- Base every figure, deal name, contact and date on the WORKSPACE DATA below. Never invent deals, people, numbers or history.",
-    "- If the data doesn't contain what's needed, say so plainly and suggest what the user could record in the CRM.",
-    "- The data is a summary and may be truncated; mention that when it matters.",
-    "- Be concise and specific. Lead with the answer, then short supporting points.",
-    "- Formatting: short paragraphs, **bold** for key figures, and '- ' bullet lists. Do not use headings, tables or code blocks.",
-    "- When drafting an email, output 'Subject: …' on the first line, then the body. Use placeholders like [your name] rather than guessing.",
+    `User: ${who || "unknown"}${ctx.workspaceName ? ` · Workspace: "${ctx.workspaceName}"` : ""}`,
+    `Today: ${ctx.today} · Currency: ${ctx.currency}`,
     "",
     "WORKSPACE DATA:",
     ctx.workspaceSummary.trim() || "(The workspace has no records yet.)",
@@ -222,11 +225,13 @@ export function trimHistory(history: AiMessage[], maxTurns = 8, maxChars = 12_00
 
 /**
  * Normalises model output to the markdown subset MarkdownView renders
- * (**bold**, *italic*, [links](url), "- " lists, line breaks).
+ * (**bold**, *italic*, "- " lists, line breaks). Links are shown as plain text: CRM notes the
+ * model reads can contain planted instructions, so its output must not become clickable links.
  */
 export function normalizeAiMarkdown(text: string): string {
   return text
     .replace(/\r\n/g, "\n")
+    .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (_m, label: string, href: string) => (label === href ? href : `${label} (${href})`))
     .replace(/^```[a-z]*\s*$/gim, "") // drop code fences
     .replace(/^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/gm, "**$1**") // headings → bold line
     .replace(/^(\s*)[*•+]\s+/gm, "$1- ") // alternative bullets → "- "

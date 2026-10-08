@@ -31,9 +31,14 @@ Built with React, TypeScript and Vite on Supabase (Postgres, Auth, Row Level Sec
 - Reports by period: won revenue, win rate, deal size, sales cycle, stage distribution, lost reasons, leaderboard, activity volume, CSV export.
 
 **Workspace & team**
-- Every signup gets its own workspace; teammates join via invite links (optionally emailed).
+- Every signup gets its own workspace with a 14-day free trial; teammates join via invite links (optionally emailed).
+- Members of several workspaces switch between them from the sidebar; members can leave a workspace.
 - Roles: Admin, Manager, Member — enforced in the database, not just the UI.
-- Onboarding, optional sample data, CSV import wizard (contacts, companies, deals) with column mapping and validation, full CSV export, JSON workspace backup.
+- Onboarding, Excel/CSV import wizard (contacts, companies, deals) with column mapping and validation, full CSV/Excel export, JSON workspace backup.
+
+**Plans & billing**
+- Starter, Growth and Enterprise plans with limits enforced in the database.
+- 14-day trial, then a paid period. When it ends, the workspace's data is locked (not deleted) behind a paywall where admins request a plan; the platform owner activates it after payment from the Platform console.
 - ⌘K command palette, keyboard shortcuts (press `?`), notifications, light and dark themes.
 
 **AI assistant** — answers questions about your pipeline and drafts follow-ups, grounded in a
@@ -83,7 +88,9 @@ Database setup, Edge Functions, secrets and Auth settings are documented in
 | Command | What it does |
 |---|---|
 | `npm run dev` | Start the dev server on port 8080 |
-| `npm run build` | Production build into `dist/` |
+| `npm run build` | Typecheck, then production build into `dist/` (fails if the Supabase env vars are missing or a `VITE_*` value looks like a secret) |
+| `npm run typecheck` | TypeScript check only |
+| `npm run check` | Typecheck + lint + tests (what CI runs, plus the build) |
 | `npm run preview` | Serve the production build locally |
 | `npm test` | Run the unit tests (Vitest) |
 | `npm run lint` | Run ESLint |
@@ -99,7 +106,7 @@ src/
     pipeline/ contacts/ companies/ activities/ tasks/ dashboard/ settings/ onboarding/ marketing/
   contexts/         AuthContext: session, current workspace, role
   hooks/            data hooks (TanStack Query) per domain
-  lib/              csv, formatting, sanitizing, AI client, sample data, import/export logic
+  lib/              csv, formatting, sanitizing, AI client, import/export logic
   integrations/     Supabase client + generated database types
   test/             unit tests
 supabase/
@@ -109,18 +116,60 @@ supabase/
 
 ---
 
+## Deployment (Vercel)
+
+`vercel.json` configures the SPA fallback (deep links such as `/invite/<token>` and
+`/auth?mode=reset` must serve `index.html`), security headers (CSP, frame denial, HSTS) and caching
+(hashed assets cached for a year, `index.html` never cached, so a deploy is picked up immediately).
+Set `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` in the Vercel project's environment
+variables (and `VITE_TURNSTILE_SITE_KEY` for CAPTCHA, see below). If you load assets from another
+origin later, extend the `Content-Security-Policy`; it already allows Cloudflare Turnstile.
+
+CI (`.github/workflows/ci.yml`) runs the typecheck, lint, tests and production build, and checks
+the edge functions with Deno, on every push and pull request.
+
 ## Go-live checklist
 
-1. **Revoke the old Groq API key.** A previous version shipped one in client code; treat it as public.
-   Create a new key and set it with `npx supabase secrets set GROQ_API_KEY=...`.
-2. **Delete or reset the account created by the removed `seed_goom_construction.sql`** (it had a well-known password).
-3. Back up the database, then apply the migrations: `npx supabase db push --linked`.
-4. Deploy the Edge Functions (`ai-chat`, `send-invite`) and set their secrets.
-5. Mirror the Auth settings from `supabase/README.md` in the hosted dashboard (email confirmation on,
-   production Site URL and redirect URLs, password policy, MFA, leaked-password protection).
-6. Fill in the legal/company placeholders on the marketing, Terms and Privacy pages
-   (`src/components/marketing/site.ts`) and have Terms/Privacy reviewed.
-7. Enable backups / point-in-time recovery for the production database.
+1. **Rotate the credentials in the git history** (see the notice at the top of
+   [supabase/README.md](supabase/README.md)): the Supabase `service_role` key and the Groq API key
+   were committed and pushed. Disable the legacy Supabase keys or rotate the JWT secret, and revoke
+   the Groq key.
+2. Back up the database, then apply the migrations.
+   - **The production migration history is incomplete:** it records `20260926000001` to
+     `20260927000001` but none of the six `20260919*` base migrations. The later migrations depend on
+     those tables, so they were most likely applied by hand. Do **not** use `db push --include-all`: it would re-run the
+     base migrations and put back the pre-multi-tenant versions of functions that later migrations
+     replaced. After confirming the base tables exist (Table Editor), mark them as applied:
+     `npx supabase migration repair --status applied 20260919000001 20260919000002 20260919000003 20260919000004 20260919000005 20260919000006 --linked`
+   - Check that only `20261007000001` is pending with `npx supabase db push --linked --dry-run`, then
+     run `npx supabase db push --linked`.
+   - `20261007000001` starts a 14-day trial for every existing workspace at the moment it runs.
+3. Add yourself as a platform admin (SQL in supabase/README.md). Activate paying or complimentary
+   workspaces in **Platform** before their trials end.
+4. After the migration, deploy the Edge Functions: `npx supabase functions deploy ai-chat send-invite`
+   (`send-invite` has never been deployed, so invitation emails aren't sent today). Set their secrets:
+   a new `GROQ_API_KEY`, `RESEND_API_KEY`, `INVITE_FROM_EMAIL` (verified domain), `SITE_URL`,
+   `ALLOWED_ORIGINS` (the production origin, e.g. `https://app.example.com`).
+5. Mirror the Auth settings from supabase/README.md in the hosted dashboard:
+   - email confirmation on;
+   - production Site URL and redirect URLs;
+   - secure email and password change;
+   - leaked-password protection;
+   - CAPTCHA, in this order: create a Cloudflare Turnstile widget for your domain; set
+     `VITE_TURNSTILE_SITE_KEY` in Vercel and deploy; only then enable CAPTCHA (provider Turnstile,
+     the widget's secret key) under Authentication → Attack Protection. Enabled without a deployed
+     site key, every password sign-in is refused;
+   - custom SMTP;
+   - MFA.
+6. Check that the shared legacy workspace was split (query in supabase/README.md).
+7. Decide how customers pay (invoice / bank transfer today; a gateway can call
+   `billing_activate_workspace`). Make sure the sales mailbox in `src/components/marketing/site.ts`
+   is monitored, since plan requests and the contact form point there.
+8. Fill in the legal/company placeholders in `src/components/marketing/site.ts`, and have Terms and
+   Privacy reviewed. Privacy must name the sub-processors (Supabase, Groq, Resend, Vercel).
+9. Set the Vercel env vars, deploy, then click through sign-up → confirm email → onboarding → invite
+   a teammate → import a spreadsheet → AI assistant on the production URL.
+10. Enable backups and point-in-time recovery for the production database.
 
 ## License
 

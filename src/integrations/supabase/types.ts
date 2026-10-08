@@ -481,6 +481,8 @@ export type Database = {
           accepted_at: string | null
           created_at: string
           email: string
+          email_last_sent_at: string | null
+          email_sent_count: number
           expires_at: string
           id: string
           invited_by: string | null
@@ -492,6 +494,8 @@ export type Database = {
           accepted_at?: string | null
           created_at?: string
           email: string
+          email_last_sent_at?: string | null
+          email_sent_count?: number
           expires_at?: string
           id?: string
           invited_by?: string | null
@@ -503,6 +507,8 @@ export type Database = {
           accepted_at?: string | null
           created_at?: string
           email?: string
+          email_last_sent_at?: string | null
+          email_sent_count?: number
           expires_at?: string
           id?: string
           invited_by?: string | null
@@ -604,8 +610,12 @@ export type Database = {
           id: string
           monthly_quota: number
           name: string
+          paid_until: string | null
           plan: string
+          plan_requested_at: string | null
+          requested_plan: string | null
           status: string
+          trial_ends_at: string | null
           updated_at: string
         }
         Insert: {
@@ -615,8 +625,12 @@ export type Database = {
           id?: string
           monthly_quota?: number
           name: string
+          paid_until?: string | null
           plan?: string
+          plan_requested_at?: string | null
+          requested_plan?: string | null
           status?: string
+          trial_ends_at?: string | null
           updated_at?: string
         }
         Update: {
@@ -626,8 +640,12 @@ export type Database = {
           id?: string
           monthly_quota?: number
           name?: string
+          paid_until?: string | null
           plan?: string
+          plan_requested_at?: string | null
+          requested_plan?: string | null
           status?: string
+          trial_ends_at?: string | null
           updated_at?: string
         }
         Relationships: []
@@ -1001,8 +1019,12 @@ export type Database = {
           monthly_quota: number
           organization_id: string
           organization_name: string
+          paid_until: string | null
           plan: string
+          requested_plan: string | null
           role: Database["public"]["Enums"]["app_role"]
+          trial_ends_at: string | null
+          billing_state: string
           workspace_status: string
         }[]
       }
@@ -1088,6 +1110,18 @@ export type Database = {
         Args: { p_org_id: string; p_status: string }
         Returns: undefined
       }
+      platform_activate_workspace: {
+        Args: { p_months: number; p_org_id: string; p_plan: string }
+        Returns: undefined
+      }
+      platform_extend_trial: {
+        Args: { p_days: number; p_org_id: string }
+        Returns: undefined
+      }
+      platform_end_subscription: {
+        Args: { p_org_id: string }
+        Returns: undefined
+      }
       platform_timeseries: {
         Args: { p_days?: number }
         Returns: {
@@ -1123,9 +1157,14 @@ export type Database = {
           member_count: number
           name: string
           owner_email: string | null
+          paid_until: string | null
           plan: string
+          plan_requested_at: string | null
+          requested_plan: string | null
           status: string
+          billing_state: string
           total_count: number
+          trial_ends_at: string | null
         }[]
       }
       remove_member: {
@@ -1142,6 +1181,14 @@ export type Database = {
       }
       set_workspace_plan: {
         Args: { p_plan: string }
+        Returns: undefined
+      }
+      leave_workspace: {
+        Args: Record<string, never>
+        Returns: undefined
+      }
+      request_plan: {
+        Args: { p_plan: string | null }
         Returns: undefined
       }
       shares_org_with: {

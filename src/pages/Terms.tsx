@@ -1,5 +1,7 @@
+import { Link } from "react-router-dom";
 import { LegalPage } from "@/components/marketing/MarketingLayout";
 import { SITE } from "@/components/marketing/site";
+import { TRIAL_DAYS } from "@/lib/plans";
 
 // OWNER TODO: have this text reviewed by a lawyer. The legal entity, contact mailbox and
 // "last updated" date come from src/components/marketing/site.ts and are placeholders.
@@ -40,13 +42,29 @@ export default function Terms() {
           ),
         },
         {
-          heading: "Fees",
+          // OWNER TODO: confirm refund, price-change and data-retention-after-expiry terms with counsel.
+          heading: "Free trial and fees",
           body: (
-            <p>
-              The Service is currently provided free of charge during a beta period. If paid plans are introduced, their
-              prices and billing terms will be published before any charges apply, and paid use will require your
-              agreement.
-            </p>
+            <>
+              <p>
+                Each new workspace starts with a free trial of {TRIAL_DAYS} days. No payment details are needed to start a
+                trial.
+              </p>
+              <p>
+                To keep using a workspace after its trial, a workspace admin chooses a paid plan. Paid plans are billed per
+                workspace for a subscription period at the prices shown on our{" "}
+                <Link to="/pricing" className="underline underline-offset-4">
+                  pricing page
+                </Link>{" "}
+                and are paid by invoice or bank transfer. A paid period starts when we confirm your payment. We do not store
+                card details, and nothing is charged automatically.
+              </p>
+              <p>
+                When a trial or paid period ends without payment for a further period, access to the workspace and its
+                Customer Data is suspended until a paid plan is activated. Your Customer Data is retained while access is
+                suspended, and access is restored once a paid plan is active.
+              </p>
+            </>
           ),
         },
         {

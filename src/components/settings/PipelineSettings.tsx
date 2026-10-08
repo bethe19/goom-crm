@@ -8,6 +8,7 @@ import { ArrowDown, ArrowUp, GripVertical, Kanban, Loader2, MoreHorizontal, Penc
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
 import { usePipelines, usePipelineStages, type Pipeline, type PipelineStage } from "@/hooks/usePipelineStages";
+import { invalidateDealQueries } from "@/hooks/useDeals";
 import { useConfirm } from "@/components/common/ConfirmDialog";
 import { EmptyState, ErrorState, ListSkeleton } from "@/components/common/States";
 import { Badge } from "@/components/ui/badge";
@@ -70,8 +71,10 @@ export function PipelineSettings() {
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["pipelines"] });
     queryClient.invalidateQueries({ queryKey: ["pipeline_stages"] });
-    queryClient.invalidateQueries({ queryKey: ["deals"] });
     queryClient.invalidateQueries({ queryKey: ["workspace-usage"] });
+    // A stage's won/lost flag or probability changes deal outcomes (synced server-side) and every
+    // deal-derived number: board, forecast, dashboard, analytics (all covered by the helper).
+    invalidateDealQueries(queryClient);
   };
 
   const reorder = async (from: number, to: number) => {
@@ -580,7 +583,11 @@ function PipelineDialog({
         const { error: stagesError } = await supabase
           .from("pipeline_stages")
           .insert(DEFAULT_STAGES.map((s, position) => ({ ...s, pipeline_id: id, position })));
-        if (stagesError) throw stagesError;
+        if (stagesError) {
+          // Don't leave a pipeline without stages behind (it has no deals yet, so deleting it is safe).
+          await supabase.from("pipelines").delete().eq("id", id);
+          throw stagesError;
+        }
         toast.success("Pipeline created with default stages");
         onSaved(id);
       }

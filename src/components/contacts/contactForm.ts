@@ -4,11 +4,21 @@ import { findCompanyByName } from "@/hooks/useCompanies";
 import { supabase } from "@/integrations/supabase/client";
 import type { Contact } from "@/hooks/useContacts";
 
+/** Digits plus common phone punctuation ( ) + - . / space and "x" for extensions, with at least 5 digits. */
+export function isValidPhone(value: string): boolean {
+  const v = value.trim();
+  return /^[\d\s()+\-./xX]+$/.test(v) && (v.match(/\d/g)?.length ?? 0) >= 5;
+}
+
 export const contactFormSchema = z.object({
   first_name: z.string().trim().min(1, "First name is required").max(100, "Keep it under 100 characters"),
   last_name: z.string().trim().max(100, "Keep it under 100 characters"),
   email: z.union([z.literal(""), z.string().trim().email("Enter a valid email address").max(255)]),
-  phone: z.string().trim().max(30, "Keep it under 30 characters"),
+  phone: z
+    .string()
+    .trim()
+    .max(30, "Keep it under 30 characters")
+    .refine((v) => !v || isValidPhone(v), "Enter a valid phone number"),
   position: z.string().trim().max(100, "Keep it under 100 characters"),
   tags: z.string().max(500),
   company: z.custom<CompanyChoice>().nullable(),

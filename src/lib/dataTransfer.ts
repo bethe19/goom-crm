@@ -1,8 +1,9 @@
 /**
  * Pure helpers for CSV import/export: column auto-mapping, per-row validation and value parsing,
- * stage matching, failed-row reports, templates and export row shapes. No I/O here, so it's unit
- * tested in src/test/import.test.ts.
+ * stage matching, failed-row reports and export row shapes. No I/O here, so it's unit tested in
+ * src/test/import.test.ts.
  */
+import { format } from "date-fns";
 
 export type ImportEntity = "contacts" | "companies" | "deals";
 
@@ -40,14 +41,23 @@ export const IMPORT_FIELDS: Record<ImportEntity, ImportField[]> = {
     { key: "company", label: "Company", synonyms: ["company", "companyname", "account", "accountname", "organization", "organisation", "org"], hint: "Linked by name; missing companies are created" },
     { key: "contact_email", label: "Contact email", synonyms: ["contactemail", "email", "contact", "emailaddress", "primarycontactemail"], hint: "Linked to an existing contact" },
     { key: "notes", label: "Notes", synonyms: ["notes", "note", "description", "comments", "comment", "details"] },
+    { key: "created_date", label: "Created date", synonyms: ["created", "createddate", "createdat", "createdon", "datecreated", "opendate", "opened"], hint: "Defaults to today" },
   ],
 };
 
 /** field key → CSV header ("" = not mapped). */
 export type ColumnMapping = Record<string, string>;
 
+/**
+ * Case, accent, space and punctuation-insensitive form of a header or stage name. Letters and digits
+ * of any script survive ("Téléphone" → "telephone", "ተሸጧል" stays), so non-Latin names still compare.
+ */
 export function normalizeHeader(h: string): string {
-  return h.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return h
+    .normalize("NFKD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]/gu, "");
 }
 
 /**
@@ -101,11 +111,23 @@ export function isValidEmail(s: string): boolean {
   return EMAIL_RE.test(s.trim());
 }
 
-/** "$1,200.50", "1 200", "85k", "1.2M", "1.234,56" → number. Blank → null. */
+/**
+ * Drops a currency symbol (any, e.g. $ € ₹) and a 1–3 letter currency code or abbreviation before or
+ * after the number: "ETB 45,000.00", "Br 1,200", "45,000 ETB", "ብር 500". A trailing k/m stays (85k).
+ */
+function stripCurrency(s: string): string {
+  let out = s.replace(/\p{Sc}/gu, "").trim();
+  out = out.replace(/^\p{L}{1,3}\.?\s*(?=[-\d.,])/u, "");
+  const suffix = /\s*(\p{L}{1,3})\.?$/u.exec(out);
+  if (suffix && !/^[km]$/i.test(suffix[1]) && /[\d.,km]$/i.test(out.slice(0, suffix.index))) out = out.slice(0, suffix.index);
+  return out;
+}
+
+/** "$1,200.50", "ETB 45,000", "1 200", "85k", "1.2M", "1.234,56 EUR" → number. Blank → null. */
 export function parseAmount(raw: string): Parsed<number | null> {
   let s = (raw ?? "").trim();
   if (!s) return { ok: true, value: null };
-  s = s.replace(/\b(usd|eur|gbp|cad|aud|jpy|inr|chf)\b/gi, "").replace(/[\s$€£¥₹'_]/g, "");
+  s = stripCurrency(s).replace(/[\s'_]/g, "");
   const m = /^(-?)([\d.,]+)([km])?$/i.exec(s);
   if (!m) return { ok: false, error: `"${raw.trim()}" isn't a number` };
   let digits = m[2];
@@ -147,12 +169,54 @@ function validYmd(y: number, m: number, d: number): string | null {
   return `${y}-${pad(m)}-${pad(d)}`;
 }
 
+/** Order of day and month in numeric dates like 05/04/2026. */
+export type DateOrder = "dmy" | "mdy";
+
+/** Day/month order of the browser's (or the given) locale: "dmy" for en-GB, de, am…, "mdy" for en-US. */
+export function localeDateOrder(locale?: string): DateOrder {
+  try {
+    const parts = new Intl.DateTimeFormat(locale, { day: "numeric", month: "numeric", year: "numeric" }).formatToParts(new Date(2026, 3, 15));
+    const day = parts.findIndex((p) => p.type === "day");
+    const month = parts.findIndex((p) => p.type === "month");
+    return day >= 0 && month >= 0 && day < month ? "dmy" : "mdy";
+  } catch {
+    return "mdy";
+  }
+}
+
+const NUMERIC_DATE_RE = /^(\d{1,2})[-/](\d{1,2})[-/](\d{2}|\d{4})$/;
+
+/**
+ * Picks one day/month order for a whole column of numeric dates, so 13/04/2026 and 05/04/2026 in the
+ * same file are read the same way. A part > 12 settles it; when nothing does (every value ≤ 12, or
+ * the column contradicts itself) `ambiguous` is true and the order is `fallback` (or the majority).
+ */
+export function inferDateOrder(values: string[], fallback: DateOrder): { order: DateOrder; ambiguous: boolean } {
+  let dmy = 0;
+  let mdy = 0;
+  let either = 0;
+  for (const raw of values) {
+    const m = NUMERIC_DATE_RE.exec((raw ?? "").trim());
+    if (!m) continue;
+    const a = +m[1];
+    const b = +m[2];
+    if (a > 12 && b <= 12) dmy++;
+    else if (b > 12 && a <= 12) mdy++;
+    else if (a <= 12 && b <= 12) either++;
+  }
+  if (dmy && !mdy) return { order: "dmy", ambiguous: false };
+  if (mdy && !dmy) return { order: "mdy", ambiguous: false };
+  if (dmy || mdy) return { order: dmy >= mdy ? "dmy" : "mdy", ambiguous: true };
+  return { order: fallback, ambiguous: either > 0 };
+}
+
 /**
  * Parses common date formats to "YYYY-MM-DD": ISO (2026-04-15, with optional time), 2026/04/15,
- * 04/15/2026 (US) or 15/04/2026 (when the first part is > 12), 15.04.2026, and textual dates
- * like "Apr 15, 2026" / "15 April 2026". Blank → null.
+ * 04/15/2026 or 15/04/2026 (per `order`, decided once per column with inferDateOrder), 15.04.2026
+ * (dotted dates are always day-first), and textual dates like "Apr 15, 2026" / "15 April 2026".
+ * Blank → null.
  */
-export function parseDateInput(raw: string): Parsed<string | null> {
+export function parseDateInput(raw: string, order: DateOrder = "mdy"): Parsed<string | null> {
   const s = (raw ?? "").trim();
   if (!s) return { ok: true, value: null };
   const bad = { ok: false as const, error: `"${s}" isn't a date we recognize (use YYYY-MM-DD)` };
@@ -167,11 +231,10 @@ export function parseDateInput(raw: string): Parsed<string | null> {
     const b = +m[2];
     let y = +m[3];
     if (m[3].length === 2) y += 2000;
-    const dotted = s.includes(".");
-    // Dotted dates (15.04.2026) are day-first; otherwise US month-first unless impossible.
-    const [mo, d] = dotted || a > 12 ? [b, a] : [a, b];
+    const dayFirst = s.includes(".") || order === "dmy";
+    const [mo, d] = dayFirst ? [b, a] : [a, b];
     const v = validYmd(y, mo, d);
-    return v ? { ok: true, value: v } : bad;
+    return v ? { ok: true, value: v } : { ok: false, error: `"${s}" isn't a valid ${dayFirst ? "day/month/year" : "month/day/year"} date` };
   }
   if (/[a-z]/i.test(s)) {
     const t = new Date(s);
@@ -237,6 +300,8 @@ export interface DealImportValues {
   company: string | null;
   contact_email: string | null;
   notes: string | null;
+  /** YYYY-MM-DD; null = created now. */
+  created_date: string | null;
 }
 export type ImportValues = ContactImportValues | CompanyImportValues | DealImportValues;
 
@@ -254,10 +319,24 @@ function tooLong(label: string, s: string | null, max: number, errors: string[])
   if (s && s.length > max) errors.push(`${label} is longer than ${max} characters`);
 }
 
-export function validateRow(entity: ImportEntity, raw: Record<string, string>, mapping: ColumnMapping, index = 0): ValidatedRow {
+/**
+ * Undoes the CSV export's formula guard ('=…, '+251…), so re-imported exports and failed-rows files
+ * keep their original values.
+ */
+export function stripFormulaGuard(s: string): string {
+  return /^'[=+\-@\t\r]/.test(s) ? s.slice(1) : s;
+}
+
+export function validateRow(
+  entity: ImportEntity,
+  raw: Record<string, string>,
+  mapping: ColumnMapping,
+  index = 0,
+  dateOrder: DateOrder = "mdy",
+): ValidatedRow {
   const get = (key: string) => {
     const h = mapping[key];
-    return h ? (raw[h] ?? "").trim() : "";
+    return h ? stripFormulaGuard((raw[h] ?? "").trim()).trim() : "";
   };
   const opt = (key: string) => get(key) || null;
   const errors: string[] = [];
@@ -306,8 +385,10 @@ export function validateRow(entity: ImportEntity, raw: Record<string, string>, m
     if (!amount.ok) errors.push(amount.error ?? "Invalid value");
     const prob = parseProbability(get("probability"));
     if (!prob.ok) errors.push(prob.error ?? "Invalid value");
-    const date = parseDateInput(get("close_date"));
+    const date = parseDateInput(get("close_date"), dateOrder);
     if (!date.ok) errors.push(date.error ?? "Invalid value");
+    const created = parseDateInput(get("created_date"), dateOrder);
+    if (!created.ok) errors.push(`Created date: ${created.error ?? "Invalid value"}`);
     const email = opt("contact_email");
     if (email && !isValidEmail(email)) errors.push(`"${email}" isn't a valid contact email`);
     values = {
@@ -319,13 +400,14 @@ export function validateRow(entity: ImportEntity, raw: Record<string, string>, m
       company: opt("company"),
       contact_email: email ? email.toLowerCase() : null,
       notes: opt("notes"),
+      created_date: created.ok ? created.value : null,
     } satisfies DealImportValues;
   }
   return { index, rowNumber: index + 2, raw, values, errors };
 }
 
-export function validateRows(entity: ImportEntity, rows: Record<string, string>[], mapping: ColumnMapping): ValidatedRow[] {
-  return rows.map((r, i) => validateRow(entity, r, mapping, i));
+export function validateRows(entity: ImportEntity, rows: Record<string, string>[], mapping: ColumnMapping, dateOrder: DateOrder = "mdy"): ValidatedRow[] {
+  return rows.map((r, i) => validateRow(entity, r, mapping, i, dateOrder));
 }
 
 /** Key used to detect duplicates (contacts by email, companies by name). null = never a duplicate. */
@@ -335,15 +417,58 @@ export function dedupeKey(entity: ImportEntity, values: ImportValues): string | 
   return null;
 }
 
-/** Case/space-insensitive stage match by name; falls back to the first stage (by position). */
-export function matchStage<S extends { id: string; name: string; position?: number }>(stages: S[], name: string | null | undefined): S | undefined {
+interface StageLike {
+  id: string;
+  name: string;
+  position?: number;
+  is_won?: boolean | null;
+  is_lost?: boolean | null;
+}
+
+/** Stage names from other CRMs' exports that mean "this pipeline's won/lost stage", whatever it's called. */
+const STAGE_ALIASES: Record<string, "is_won" | "is_lost"> = { won: "is_won", closedwon: "is_won", lost: "is_lost", closedlost: "is_lost" };
+
+/**
+ * Stage match by name (case, accent and punctuation-insensitive, any script), then "Won"/"Closed Won"
+ * and "Lost"/"Closed Lost" to the won/lost stage. Otherwise the first stage (by position), with
+ * `matched` false so callers can warn about names that aren't in the pipeline.
+ */
+export function resolveStage<S extends StageLike>(stages: S[], name: string | null | undefined): { stage: S | undefined; matched: boolean } {
   const sorted = [...stages].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
   const n = normalizeHeader(name ?? "");
   if (n) {
     const hit = sorted.find((s) => normalizeHeader(s.name) === n);
-    if (hit) return hit;
+    if (hit) return { stage: hit, matched: true };
+    const flag = STAGE_ALIASES[n];
+    const alias = flag && sorted.find((s) => s[flag]);
+    if (alias) return { stage: alias, matched: true };
   }
-  return sorted[0];
+  return { stage: sorted[0], matched: false };
+}
+
+/** Stage for an imported name, else the first stage (by position). See resolveStage. */
+export function matchStage<S extends StageLike>(stages: S[], name: string | null | undefined): S | undefined {
+  return resolveStage(stages, name).stage;
+}
+
+/**
+ * Stage-dependent checks for validated deal rows, once the pipeline's stages are known. Deals going
+ * into a won/lost stage need a close date: it becomes won_at/lost_at (without one the database stamps
+ * now, and old wins land in this month's reports). Also counts importable rows whose stage name isn't
+ * in the pipeline (they go to the first stage).
+ */
+export function checkDealStages<S extends StageLike>(rows: ValidatedRow[], stages: S[]): { rows: ValidatedRow[]; unmatchedStages: number } {
+  if (!stages.length) return { rows, unmatchedStages: 0 };
+  let unmatchedStages = 0;
+  const out = rows.map((r) => {
+    const v = r.values as DealImportValues;
+    const { stage, matched } = resolveStage(stages, v.stage);
+    const closed = stage?.is_won || stage?.is_lost;
+    const row = closed && !v.close_date ? { ...r, errors: [...r.errors, `Close date is required for deals in the "${stage.name}" stage`] } : r;
+    if (v.stage && !matched && !row.errors.length) unmatchedStages++;
+    return row;
+  });
+  return { rows: out, unmatchedStages };
 }
 
 export interface FailedRow {
@@ -360,31 +485,14 @@ export function failedRowsCsv(headers: string[], failures: FailedRow[]): { heade
   };
 }
 
-// ---------- templates & export shapes ----------
+// ---------- export shapes ----------
 
-export const IMPORT_TEMPLATES: Record<ImportEntity, { headers: string[]; rows: string[][] }> = {
-  contacts: {
-    headers: ["first_name", "last_name", "email", "phone", "position", "company", "tags"],
-    rows: [
-      ["Jane", "Smith", "jane.smith@example.com", "+1 555 0101", "VP Sales", "Example Corp", "decision-maker; enterprise"],
-      ["Sam", "Lee", "sam.lee@example.com", "", "Operations Manager", "Sample Industries", ""],
-    ],
-  },
-  companies: {
-    headers: ["name", "industry", "website"],
-    rows: [
-      ["Example Corp", "Software", "https://example.com"],
-      ["Sample Industries", "Manufacturing", "example.org"],
-    ],
-  },
-  deals: {
-    headers: ["title", "value", "probability", "close_date", "stage", "company", "contact_email", "notes"],
-    rows: [
-      ["Annual subscription", "24000", "60", "2026-12-15", "Qualified", "Example Corp", "jane.smith@example.com", "Renewal discussion"],
-      ["Pilot project", "8500", "", "2027-01-31", "", "Sample Industries", "", ""],
-    ],
-  },
-};
+/** Local calendar date (or `pattern`) of a timestamp for exports, not its UTC date; "" when missing. */
+export function exportDate(ts: string | null | undefined, pattern = "yyyy-MM-dd"): string {
+  if (!ts) return "";
+  const d = new Date(ts);
+  return Number.isNaN(d.getTime()) ? "" : format(d, pattern);
+}
 
 interface ContactLike {
   first_name: string;
@@ -398,7 +506,7 @@ interface ContactLike {
 }
 export const CONTACT_EXPORT_HEADERS = ["First name", "Last name", "Email", "Phone", "Job title", "Company", "Tags", "Created"];
 export function contactExportRow(c: ContactLike): string[] {
-  return [c.first_name, c.last_name, c.email ?? "", c.phone ?? "", c.position ?? "", c.companies?.name ?? "", (c.tags ?? []).join("; "), c.created_at.slice(0, 10)];
+  return [c.first_name, c.last_name, c.email ?? "", c.phone ?? "", c.position ?? "", c.companies?.name ?? "", (c.tags ?? []).join("; "), exportDate(c.created_at)];
 }
 
 interface CompanyLike {
@@ -409,5 +517,5 @@ interface CompanyLike {
 }
 export const COMPANY_EXPORT_HEADERS = ["Name", "Industry", "Website", "Created"];
 export function companyExportRow(c: CompanyLike): string[] {
-  return [c.name, c.industry ?? "", c.website ?? "", c.created_at.slice(0, 10)];
+  return [c.name, c.industry ?? "", c.website ?? "", exportDate(c.created_at)];
 }

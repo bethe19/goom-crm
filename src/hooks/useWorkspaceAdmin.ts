@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
 import { fetchAllRows } from "@/lib/fetchAll";
-import { backupFilename } from "@/components/settings/validation";
+import { assertAffected, backupFilename } from "@/components/settings/validation";
 
 export interface WorkspaceCounts {
   deals: number;
@@ -50,7 +50,10 @@ export interface FeedbackItem {
 
 export const FEEDBACK_STATUSES = ["new", "reviewed", "resolved"] as const;
 
-/** Feedback submitted in this workspace (RLS-limited), newest first. */
+/**
+ * Feedback submitted in this workspace, newest first. RLS also lets everyone read their own feedback
+ * from other workspaces, so the list is filtered to the current one explicitly.
+ */
 export function useWorkspaceFeedback(limit = 25) {
   const { organization } = useAuth();
   return useQuery({
@@ -60,6 +63,7 @@ export function useWorkspaceFeedback(limit = 25) {
       const { data, error } = await supabase
         .from("feedback")
         .select("id, user_id, rating, category, comment, email, status, created_at")
+        .eq("organization_id", organization!.id)
         .order("created_at", { ascending: false })
         .limit(limit);
       if (error) throw error;
@@ -72,8 +76,10 @@ export function useUpdateFeedbackStatus() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async ({ id, status }: { id: string; status: string }) => {
-      const { error } = await supabase.from("feedback").update({ status }).eq("id", id);
+      // RLS silently skips rows the caller may not update: require the row back to report success.
+      const { data, error } = await supabase.from("feedback").update({ status }).eq("id", id).select("id");
       if (error) throw error;
+      assertAffected(data?.length ?? 0);
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["workspace-feedback"] }),
   });

@@ -82,17 +82,23 @@ export function parseQuickTask(text: string, now: Date = new Date()): QuickTask 
   let title = ` ${text.trim()} `;
   let priority: TaskPriority = "medium";
   let due: Date | null = null;
+  // Cut out exactly the matched span (String#replace would remove the first occurrence of the same
+  // text instead, e.g. the "today" in "today's").
+  const cut = (s: string, m: RegExpMatchArray) => {
+    const i = m.index ?? 0;
+    return `${s.slice(0, i)} ${s.slice(i + m[0].length)}`;
+  };
 
   const prio = title.match(/\s!(high|low|medium|!)(?=\s)/i);
   if (prio) {
     const p = prio[1].toLowerCase();
     priority = p === "!" ? "high" : (p as TaskPriority);
-    title = title.replace(prio[0], " ");
+    title = cut(title, prio);
   }
   const when = title.match(/\s(today|tomorrow)(?=\s*$)/i) ?? title.match(/^\s(today|tomorrow)(?=\s)/i);
   if (when) {
     due = startOfDay(when[1].toLowerCase() === "tomorrow" ? addDays(now, 1) : now);
-    title = title.replace(when[0], " ");
+    title = cut(title, when);
   }
   title = title.replace(/\s+/g, " ").trim();
   return { title, due_date: due ? due.toISOString() : null, priority };

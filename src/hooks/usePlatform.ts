@@ -11,7 +11,9 @@ import {
   fillDailySeries,
   normalizeOverview,
   toNumber,
+  toPlanIdOrNull,
   totalFromRows,
+  workspaceBillingState,
   type PlatformContactRequestRow,
   type PlatformFeedbackRow,
   type PlatformOverview,
@@ -30,6 +32,7 @@ export type {
   PlatformTimeseriesPoint,
   PlatformUserRow,
   PlatformWorkspaceRow,
+  WorkspaceBillingState,
   WorkspaceStatus,
 } from "@/components/platform/platformUtils";
 
@@ -99,6 +102,11 @@ export function usePlatformWorkspaces({ search, page }: { search: string; page: 
         contact_count: toNumber(r.contact_count),
         ai_requests_30d: toNumber(r.ai_requests_30d),
         last_activity_at: strOrNull(r.last_activity_at),
+        trial_ends_at: strOrNull(r.trial_ends_at),
+        paid_until: strOrNull(r.paid_until),
+        billing_state: workspaceBillingState(r.billing_state, strOrNull(r.trial_ends_at), strOrNull(r.paid_until)),
+        requested_plan: toPlanIdOrNull(r.requested_plan),
+        plan_requested_at: strOrNull(r.plan_requested_at),
         total_count: toNumber(r.total_count),
       })),
     placeholderData: keepPreviousData,
@@ -178,5 +186,46 @@ export function useSetPlatformWorkspaceStatus() {
       await callRpc<unknown>("platform_set_workspace_status", { p_org_id: orgId, p_status: status });
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: platformKeys.all }),
+  });
+}
+
+/** Billing changes alter the workspaces list (state, request) and the overview counts. */
+function invalidateBilling(queryClient: ReturnType<typeof useQueryClient>) {
+  return Promise.all([
+    queryClient.invalidateQueries({ queryKey: [...platformKeys.all, "workspaces"] }),
+    queryClient.invalidateQueries({ queryKey: platformKeys.overview() }),
+  ]);
+}
+
+/** After payment: set the plan and extend the paid period by `months` (clears any pending request). */
+export function useActivatePlatformWorkspace() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ orgId, plan, months }: { orgId: string; plan: PlanId; months: number }) => {
+      await callRpc<unknown>("platform_activate_workspace", { p_org_id: orgId, p_plan: plan, p_months: months });
+    },
+    onSuccess: () => invalidateBilling(queryClient),
+  });
+}
+
+/** Give a workspace `days` more trial days (from now, or from its current trial end if later). */
+export function useExtendPlatformTrial() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ orgId, days }: { orgId: string; days: number }) => {
+      await callRpc<unknown>("platform_extend_trial", { p_org_id: orgId, p_days: days });
+    },
+    onSuccess: () => invalidateBilling(queryClient),
+  });
+}
+
+/** End the paid period now (refund, chargeback). Data is kept; the workspace locks unless still in its trial. */
+export function useEndPlatformSubscription() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ orgId }: { orgId: string }) => {
+      await callRpc<unknown>("platform_end_subscription", { p_org_id: orgId });
+    },
+    onSuccess: () => invalidateBilling(queryClient),
   });
 }

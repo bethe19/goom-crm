@@ -5,7 +5,7 @@ import { Columns3, FileSpreadsheet, Kanban, List, Loader2, Plus, SearchX, Settin
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
 import { usePipelines, usePipelineStages, type PipelineStage } from "@/hooks/usePipelineStages";
-import { useDeal, useDeals, useMoveDeal, type Deal } from "@/hooks/useDeals";
+import { useDeal, useDeals, useMoveDeal, type Deal, type DealMoveRestore } from "@/hooks/useDeals";
 import { useStageEnteredAt } from "@/hooks/useDealAuditLog";
 import { useDebounce } from "@/hooks/useDebounce";
 import { useToast } from "@/hooks/use-toast";
@@ -25,7 +25,7 @@ import { DealDetailSheet } from "@/components/pipeline/DealDetailSheet";
 import { PipelineFilters } from "@/components/pipeline/PipelineFilters";
 import { LostReasonDialog } from "@/components/pipeline/LostReasonDialog";
 import { useWorkspaceMembers } from "@/components/pipeline/useWorkspaceMembers";
-import { EMPTY_DEAL_FILTERS, daysSince, filterDeals, hasActiveDealFilters, summarizeDeals, type DealFilters } from "@/components/pipeline/dealUtils";
+import { EMPTY_DEAL_FILTERS, daysSince, filterDeals, hasActiveDealFilters, openDeals, summarizeDeals, type DealFilters } from "@/components/pipeline/dealUtils";
 
 const PIPELINE_KEY = "goom.pipeline.selected";
 const VIEW_KEY = "goom.pipeline.view";
@@ -44,6 +44,11 @@ function writeStorage(key: string, value: string) {
   } catch {
     /* storage unavailable (private mode) — the choice just isn't remembered */
   }
+}
+
+/** Focuses a board card's actions ("…") button, if the card is on screen. */
+function focusDealActions(dealId: string) {
+  document.querySelector<HTMLElement>(`[data-deal-id="${CSS.escape(dealId)}"] [data-deal-actions]`)?.focus();
 }
 
 function BoardSkeleton() {
@@ -108,9 +113,10 @@ export default function Pipeline() {
   const [filters, setFilters] = useState<DealFilters>(EMPTY_DEAL_FILTERS);
   const debouncedSearch = useDebounce(filters.search, 250);
   const effectiveFilters = useMemo(() => ({ ...filters, search: debouncedSearch }), [filters, debouncedSearch]);
-  const filtered = useMemo(() => filterDeals(deals, effectiveFilters, user?.id), [deals, effectiveFilters, user?.id]);
+  const filtered = useMemo(() => filterDeals(deals, effectiveFilters, user?.id, stages), [deals, effectiveFilters, user?.id, stages]);
   const filtersActive = hasActiveDealFilters(filters);
-  const summary = summarizeDeals(filtered);
+  // Money totals cover open deals only (won/lost aren't pipeline; won would count at 100% weighted).
+  const openSummary = useMemo(() => summarizeDeals(openDeals(filtered, stages)), [filtered, stages]);
   const [view, setView] = useState<ViewMode>(() => (readStorage(VIEW_KEY) === "list" ? "list" : "board"));
   const changeView = (v: ViewMode) => {
     setView(v);
@@ -152,39 +158,64 @@ export default function Pipeline() {
   }, [openedDeal, pipeline, selectPipeline]);
 
   // ── Moving deals (drag and drop or "Move to…") ──
-  const moveDeal = useMoveDeal();
-  const [pendingLost, setPendingLost] = useState<{ deal: Deal; stage: PipelineStage } | null>(null);
+  // mutateAsync per move: callbacks passed to mutate() are dropped once another move starts, losing toasts.
+  const { mutateAsync: moveDealAsync } = useMoveDeal();
+  const [pendingLost, setPendingLost] = useState<{ deal: Deal; stage: PipelineStage; refocus: boolean } | null>(null);
+  // A "Move to…" re-creates the card in another column: keyboard focus follows it to its actions button.
+  const refocusAfterMove = useRef<{ dealId: string; stageId: string } | null>(null);
 
   const doMove = useCallback(
-    (deal: Deal, stage: PipelineStage, lostReason?: string, undoable = true) => {
+    async (deal: Deal, stage: PipelineStage, options?: { lostReason?: string; undoable?: boolean; restore?: DealMoveRestore }) => {
       const from = stages.find((s) => s.id === deal.stage_id);
-      moveDeal.mutate(
-        { deal, stage, lostReason },
-        {
-          onSuccess: () => {
-            toast({
-              title: stage.is_won ? `Won: ${deal.title}` : stage.is_lost ? `Lost: ${deal.title}` : `Moved to ${stage.name}`,
-              description: stage.is_won || stage.is_lost ? undefined : deal.title,
-              action: undoable && from ? { label: "Undo", onClick: () => doMove({ ...deal, stage_id: stage.id }, from, deal.lost_reason ?? undefined, false) } : undefined,
-            });
-          },
-          onError: (err) => {
-            toast({ title: `Couldn't move “${deal.title}”`, description: errorMessage(err), variant: "destructive" });
-          },
-        },
-      );
+      try {
+        await moveDealAsync({ deal, stage, lostReason: options?.lostReason, fromStage: from, restore: options?.restore });
+      } catch (err) {
+        toast({ title: `Couldn't move “${deal.title}”`, description: errorMessage(err), variant: "destructive" });
+        return;
+      }
+      const undoable = options?.undoable ?? true;
+      toast({
+        title: stage.is_won ? `Won: ${deal.title}` : stage.is_lost ? `Lost: ${deal.title}` : `Moved to ${stage.name}`,
+        description: stage.is_won || stage.is_lost ? undefined : deal.title,
+        action:
+          undoable && from
+            ? {
+                label: "Undo",
+                // Put back the deal's own probability and lost reason, not the old stage's defaults.
+                onClick: () =>
+                  void doMove({ ...deal, stage_id: stage.id }, from, {
+                    undoable: false,
+                    restore: { probability: deal.probability, lost_reason: deal.lost_reason ?? null },
+                  }),
+              }
+            : undefined,
+      });
     },
-    [moveDeal, stages, toast],
+    [moveDealAsync, stages, toast],
   );
 
   const handleMove = useCallback(
-    (deal: Deal, stage: PipelineStage) => {
+    (deal: Deal, stage: PipelineStage, source?: "drag" | "menu") => {
       if (deal.stage_id === stage.id) return;
-      if (stage.is_lost) setPendingLost({ deal, stage });
-      else doMove(deal, stage);
+      const refocus = source === "menu";
+      if (stage.is_lost) {
+        setPendingLost({ deal, stage, refocus });
+        return;
+      }
+      if (refocus) refocusAfterMove.current = { dealId: deal.id, stageId: stage.id };
+      void doMove(deal, stage);
     },
     [doMove],
   );
+
+  useEffect(() => {
+    const target = refocusAfterMove.current;
+    if (!target) return;
+    const moved = filtered.find((d) => d.id === target.dealId);
+    if (moved && moved.stage_id !== target.stageId) return; // the optimistic move hasn't rendered yet
+    refocusAfterMove.current = null;
+    if (moved) focusDealActions(moved.id);
+  }, [filtered]);
 
   // ── Card helpers ──
   const ownerOf = useCallback((deal: Deal) => (deal.owner_id ? byId.get(deal.owner_id) : undefined), [byId]);
@@ -383,8 +414,8 @@ export default function Pipeline() {
             currency={currency}
           />
           <p className="text-xs text-muted-foreground tabular-nums" aria-live="polite">
-            {filtersActive ? `${summary.count} of ${deals.length} deals` : `${summary.count} ${summary.count === 1 ? "deal" : "deals"}`} ·{" "}
-            {formatCurrency(summary.total, currency)} total · {formatCurrency(summary.weighted, currency)} weighted
+            {filtersActive ? `${filtered.length} of ${deals.length} deals` : `${filtered.length} ${filtered.length === 1 ? "deal" : "deals"}`} ·{" "}
+            {formatCurrency(openSummary.total, currency)} open · {formatCurrency(openSummary.weighted, currency)} weighted
           </p>
         </div>
       )}
@@ -407,9 +438,19 @@ export default function Pipeline() {
         open={!!pendingLost}
         dealTitle={pendingLost?.deal.title}
         stageName={pendingLost?.stage.name}
-        onCancel={() => setPendingLost(null)}
+        onCancel={() => {
+          // The dialog has no trigger to return focus to: put it back on the card's menu button.
+          if (pendingLost?.refocus) {
+            const id = pendingLost.deal.id;
+            setTimeout(() => focusDealActions(id), 0);
+          }
+          setPendingLost(null);
+        }}
         onConfirm={(reason) => {
-          if (pendingLost) doMove(pendingLost.deal, pendingLost.stage, reason);
+          if (pendingLost) {
+            if (pendingLost.refocus) refocusAfterMove.current = { dealId: pendingLost.deal.id, stageId: pendingLost.stage.id };
+            void doMove(pendingLost.deal, pendingLost.stage, { lostReason: reason });
+          }
           setPendingLost(null);
         }}
       />

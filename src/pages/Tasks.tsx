@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { CheckCircle2, CheckSquare, Loader2, Plus, Search, SearchX, X } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
-import { useTask, useTaskList, type Task, type TaskView } from "@/hooks/useTasks";
+import { useTask, useTaskList, useTodayTasks, type Task, type TaskView } from "@/hooks/useTasks";
 import { useDebounce } from "@/hooks/useDebounce";
 import { useToast } from "@/hooks/use-toast";
 import { PageBanner } from "@/components/PageBanner";
@@ -42,10 +42,29 @@ export default function Tasks() {
     setPriority("");
   };
 
-  const list = useTaskList({ view, completedMineOnly: !seesAll, search: debouncedSearch, priority });
-  const rows = useMemo(() => list.data?.pages.flatMap((p) => p.rows) ?? [], [list.data]);
-  const total = list.data?.pages[0]?.count ?? 0;
-  const groups = useMemo(() => (view === "completed" ? [] : groupTasks(rows)), [rows, view]);
+  const listParams = { view, completedMineOnly: !seesAll, search: debouncedSearch, priority };
+  const list = useTaskList(listParams);
+  // Today's tasks load separately (the paginated list leaves them out) so a long overdue backlog can't hide them.
+  const todayQuery = useTodayTasks(listParams, { enabled: view !== "completed" });
+  const todayRows = useMemo(() => (view === "completed" ? [] : todayQuery.data ?? []), [todayQuery.data, view]);
+  const rows = useMemo(() => {
+    const listRows = list.data?.pages.flatMap((p) => p.rows) ?? [];
+    if (todayRows.length === 0) return listRows;
+    const ids = new Set(todayRows.map((t) => t.id));
+    return [...todayRows, ...listRows.filter((t) => !ids.has(t.id))];
+  }, [list.data, todayRows]);
+  const total = (list.data?.pages[0]?.count ?? 0) + todayRows.length;
+  // Today first, then Overdue / Upcoming / No date.
+  const groups = useMemo(
+    () => (view === "completed" ? [] : groupTasks(rows).sort((a, b) => Number(b.key === "today") - Number(a.key === "today"))),
+    [rows, view],
+  );
+  const loading = list.isLoading || (view !== "completed" && todayQuery.isLoading);
+  const loadError = list.error ?? (view !== "completed" ? todayQuery.error : null);
+  const refetchAll = () => {
+    list.refetch();
+    if (view !== "completed") todayQuery.refetch();
+  };
 
   // Dialogs & URL params (?new=1[&due=yyyy-MM-dd], ?open=<id>).
   const [createOpen, setCreateOpen] = useState(false);
@@ -97,10 +116,10 @@ export default function Tasks() {
   );
 
   let content: React.ReactNode;
-  if (list.isLoading) {
+  if (loading) {
     content = <ListSkeleton rows={6} />;
-  } else if (list.error) {
-    content = <ErrorState title="Couldn't load tasks" error={list.error} onRetry={() => list.refetch()} />;
+  } else if (loadError) {
+    content = <ErrorState title="Couldn't load tasks" error={loadError} onRetry={refetchAll} />;
   } else if (rows.length === 0 && filtersActive) {
     content = (
       <EmptyState

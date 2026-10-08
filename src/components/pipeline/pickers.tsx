@@ -90,6 +90,7 @@ export function CompanyPicker({ allowCreate = true, ...props }: BasePickerProps 
               }
               queryClient.invalidateQueries({ queryKey: ["companies"] });
               queryClient.invalidateQueries({ queryKey: ["company-options"] });
+              queryClient.invalidateQueries({ queryKey: ["global-search"] });
               toast({ title: "Company created", description: created.name, variant: "success" });
               return { value: created.id, label: created.name };
             }
@@ -110,8 +111,11 @@ export function ContactPicker({ allowCreate = true, companyId, ...props }: BaseP
     queryKey: ["contact-options", term],
     queryFn: async (): Promise<PickerOption[]> => {
       let q = supabase.from("contacts").select("id, first_name, last_name, email, companies(name)").order("first_name").limit(20);
-      const f = ilikeAny(["first_name", "last_name", "email"], term);
-      if (f) q = q.or(f);
+      // Every word must match a column, so "Jane Smith" finds first_name=Jane, last_name=Smith.
+      for (const word of term.trim().split(/\s+/).filter(Boolean).slice(0, 5)) {
+        const f = ilikeAny(["first_name", "last_name", "email"], word);
+        if (f) q = q.or(f);
+      }
       const { data, error } = await q;
       if (error) throw error;
       return ((data ?? []) as { id: string; first_name: string; last_name: string; email: string | null; companies: { name: string } | null }[]).map((c) => ({
@@ -150,6 +154,8 @@ export function ContactPicker({ allowCreate = true, companyId, ...props }: BaseP
               }
               queryClient.invalidateQueries({ queryKey: ["contacts"] });
               queryClient.invalidateQueries({ queryKey: ["contact-options"] });
+              queryClient.invalidateQueries({ queryKey: ["global-search"] });
+              queryClient.invalidateQueries({ queryKey: ["workspace-usage"] });
               const name = `${created.first_name} ${created.last_name}`.trim();
               toast({ title: "Contact created", description: name, variant: "success" });
               return { value: created.id, label: name };

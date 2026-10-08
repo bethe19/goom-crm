@@ -1,7 +1,7 @@
-import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient, keepPreviousData, type QueryClient, type QueryKey } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { assertAffected } from "@/components/settings/validation";
-import { ilikeAny, PAGE_SIZE } from "@/lib/postgrest";
+import { ilikeAny, PAGE_SIZE, rangeNotSatisfiableTotal } from "@/lib/postgrest";
 import { chunk, escapeLike, fetchAllRows } from "@/lib/fetchAll";
 import type { Task } from "@/hooks/useTasks";
 
@@ -115,7 +115,13 @@ export function useContactsPage(params: ContactsPageParams) {
         .limit(1, { referencedTable: "activities" })
         .range(page * pageSize, page * pageSize + pageSize - 1);
       const { data, error, count } = await query;
-      if (error) throw error;
+      if (error) {
+        // Offset past the end (e.g. the last page was just deleted): report it as an empty page so the
+        // list can step back instead of showing an error.
+        const outOfRangeTotal = rangeNotSatisfiableTotal(error);
+        if (outOfRangeTotal !== null) return { rows: [], total: outOfRangeTotal };
+        throw error;
+      }
       return { rows: ((data ?? []) as Record<string, unknown>[]).map(normalize), total: count ?? 0 };
     },
   });
@@ -155,11 +161,15 @@ export function useContactTags() {
 export async function findContactByEmail(email: string, excludeId?: string): Promise<Contact | null> {
   const e = email.trim();
   if (!e) return null;
-  let query: AnyQuery = supabase.from("contacts").select(CONTACT_SELECT).ilike("email", escapeLike(e));
+  // PostgREST reads `*` in (i)like patterns as `%`, so match it as a single character (`_`) and
+  // confirm the exact value below.
+  const pattern = escapeLike(e).replace(/\*/g, "_");
+  let query: AnyQuery = supabase.from("contacts").select(CONTACT_SELECT).ilike("email", pattern);
   if (excludeId) query = query.neq("id", excludeId);
-  const { data, error } = await query.limit(1);
+  const { data, error } = await query.limit(20);
   if (error) throw error;
-  const row = (data as Record<string, unknown>[] | null)?.[0];
+  const target = e.toLowerCase();
+  const row = ((data as Record<string, unknown>[] | null) ?? []).find((r) => typeof r.email === "string" && r.email.toLowerCase() === target);
   return row ? normalize(row) : null;
 }
 
@@ -174,6 +184,39 @@ export function useDuplicateContactEmail(email: string, excludeId?: string) {
   });
 }
 
+/**
+ * Query roots that show contact names or details: lists, pickers, embeds on companies/deals, search.
+ * Company options too, since the contact form can create a company (resolveCompanyChoice).
+ */
+const CONTACT_DATA_KEYS: QueryKey[] = [
+  ["contacts"],
+  ["contact-options"],
+  ["picker-label", "contacts"],
+  ["companies"],
+  ["company-options"],
+  ["deals"],
+  ["deal"],
+  ["global-search"],
+];
+
+/** After a delete, also the records that referenced the contacts (now unlinked) and usage counts. */
+const CONTACT_DELETE_KEYS: QueryKey[] = [
+  ...CONTACT_DATA_KEYS,
+  ["deal-options"],
+  ["activities"],
+  ["activities-feed"],
+  ["activity"],
+  ["calendar"],
+  ["analytics"],
+  ["tasks"],
+  ["task"],
+  ["workspace-usage"],
+];
+
+function invalidateKeys(queryClient: QueryClient, keys: QueryKey[]) {
+  for (const queryKey of keys) queryClient.invalidateQueries({ queryKey });
+}
+
 export function useCreateContact() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -182,11 +225,7 @@ export function useCreateContact() {
       if (error) throw error;
       return normalize(data as Record<string, unknown>);
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["contacts"] });
-      queryClient.invalidateQueries({ queryKey: ["companies"] });
-      queryClient.invalidateQueries({ queryKey: ["workspace-usage"] });
-    },
+    onSuccess: () => invalidateKeys(queryClient, [...CONTACT_DATA_KEYS, ["workspace-usage"]]),
   });
 }
 
@@ -201,20 +240,9 @@ export function useUpdateContact() {
     },
     onSuccess: (contact) => {
       queryClient.setQueryData(["contacts", "detail", contact.id], contact);
-      queryClient.invalidateQueries({ queryKey: ["contacts"] });
-      queryClient.invalidateQueries({ queryKey: ["companies"] });
-      queryClient.invalidateQueries({ queryKey: ["deals"] });
+      invalidateKeys(queryClient, CONTACT_DATA_KEYS);
     },
   });
-}
-
-function invalidateAfterDelete(queryClient: ReturnType<typeof useQueryClient>) {
-  queryClient.invalidateQueries({ queryKey: ["contacts"] });
-  queryClient.invalidateQueries({ queryKey: ["companies"] });
-  queryClient.invalidateQueries({ queryKey: ["deals"] });
-  queryClient.invalidateQueries({ queryKey: ["activities"] });
-  queryClient.invalidateQueries({ queryKey: ["tasks"] });
-  queryClient.invalidateQueries({ queryKey: ["workspace-usage"] });
 }
 
 export function useDeleteContact() {
@@ -225,11 +253,15 @@ export function useDeleteContact() {
       if (error) throw error;
       assertAffected(count);
     },
-    onSuccess: () => invalidateAfterDelete(queryClient),
+    onSuccess: () => invalidateKeys(queryClient, CONTACT_DELETE_KEYS),
   });
 }
 
-/** Deletes many contacts with one `.in()` request per 100 ids. Resolves to the number deleted. */
+/**
+ * Deletes many contacts with one `.in()` request per 100 ids. Resolves to the number the server
+ * actually deleted (rows the caller may not delete are skipped by RLS). Lists refresh even when a
+ * later chunk fails, so rows that were already deleted don't linger on screen.
+ */
 export function useBulkDeleteContacts() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -238,11 +270,11 @@ export function useBulkDeleteContacts() {
       for (const part of chunk(ids, 100)) {
         const { error, count } = await supabase.from("contacts").delete({ count: "exact" }).in("id", part);
         if (error) throw error;
-        deleted += count ?? part.length;
+        deleted += count ?? 0;
       }
       return deleted;
     },
-    onSuccess: () => invalidateAfterDelete(queryClient),
+    onSettled: () => invalidateKeys(queryClient, CONTACT_DELETE_KEYS),
   });
 }
 
@@ -281,14 +313,15 @@ export function useBulkTagContacts() {
       let changed = 0;
       for (const g of groups.values()) {
         for (const part of chunk(g.ids, 100)) {
-          const { error } = await supabase.from("contacts").update({ tags: g.tags }).in("id", part);
+          const { error, count } = await supabase.from("contacts").update({ tags: g.tags }, { count: "exact" }).in("id", part);
           if (error) throw error;
-          changed += part.length;
+          changed += count ?? 0;
         }
       }
       return changed;
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["contacts"] }),
+    // Settled, not success: a later chunk can fail after earlier ones were saved.
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["contacts"] }),
   });
 }
 

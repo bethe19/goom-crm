@@ -1,9 +1,11 @@
+import { Link } from "react-router-dom";
 import type { LucideIcon } from "lucide-react";
-import { Ban, Bot, Building2, Contact, Handshake, MailCheck, UserPlus, Users, Activity } from "lucide-react";
+import { ArrowRight, Ban, Bot, Building2, Clock, Contact, CreditCard, Handshake, Inbox, Lock, MailCheck, UserPlus, Users, Activity } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ErrorState } from "@/components/common/States";
 import { SectionCard } from "@/components/dashboard/ChartParts";
 import { formatNumber, formatPercent } from "@/lib/formatters";
+import { cn } from "@/lib/utils";
 import { PLAN_ORDER, PLANS } from "@/lib/plans";
 import { usePlatformOverview, type PlatformOverview as Overview } from "@/hooks/usePlatform";
 import { ActivityCharts } from "./ActivityCharts";
@@ -13,6 +15,8 @@ interface Tile {
   value: number;
   icon: LucideIcon;
   sub?: string;
+  /** Highlight (e.g. plan requests waiting for payment details). */
+  attention?: boolean;
 }
 
 function tilesFor(o: Overview): Tile[] {
@@ -31,13 +35,28 @@ function tilesFor(o: Overview): Tile[] {
   ];
 }
 
+function billingTilesFor(o: Overview): Tile[] {
+  return [
+    { label: "Paying", value: o.paying_workspaces, icon: CreditCard, sub: "Paid period running" },
+    { label: "On free trial", value: o.trialing_workspaces, icon: Clock, sub: "Trial running, not paid" },
+    { label: "Expired", value: o.expired_workspaces, icon: Lock, sub: o.expired_workspaces ? "Data locked until activated" : "None locked" },
+    {
+      label: "Plan requests",
+      value: o.plan_requests,
+      icon: Inbox,
+      sub: o.plan_requests ? "Waiting for payment details" : "Nothing pending",
+      attention: o.plan_requests > 0,
+    },
+  ];
+}
+
 function StatTile({ tile }: { tile: Tile }) {
   const Icon = tile.icon;
   return (
-    <div className="min-w-0 rounded-xl border border-border bg-card p-4">
+    <div className={cn("min-w-0 rounded-xl border bg-card p-4", tile.attention ? "border-warning/40 bg-warning/5" : "border-border")}>
       <div className="flex items-center justify-between gap-2">
         <p className="truncate text-xs font-medium text-muted-foreground">{tile.label}</p>
-        <Icon className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+        <Icon className={cn("h-4 w-4 shrink-0", tile.attention ? "text-warning" : "text-muted-foreground")} aria-hidden />
       </div>
       <p className="mt-2 text-2xl font-semibold tracking-tight tabular-nums text-foreground">{formatNumber(tile.value)}</p>
       {tile.sub && <p className="mt-1 truncate text-xs text-muted-foreground">{tile.sub}</p>}
@@ -88,6 +107,11 @@ export function PlatformOverview() {
               </div>
             ))}
           </div>
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <Skeleton key={i} className="h-[98px] rounded-xl" />
+            ))}
+          </div>
           <Skeleton className="h-[108px] w-full rounded-xl" />
         </div>
       ) : query.isError ? (
@@ -98,6 +122,26 @@ export function PlatformOverview() {
             {tilesFor(query.data).map((t) => (
               <StatTile key={t.label} tile={t} />
             ))}
+          </section>
+          <section aria-labelledby="billing-overview-heading" className="space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <h2 id="billing-overview-heading" className="text-sm font-semibold">
+                Billing
+              </h2>
+              {query.data.plan_requests > 0 && (
+                <Link
+                  to="/platform?tab=workspaces"
+                  className="inline-flex items-center gap-1 rounded-sm text-sm font-medium text-foreground underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  Review {query.data.plan_requests === 1 ? "request" : "requests"} <ArrowRight className="h-3.5 w-3.5" aria-hidden />
+                </Link>
+              )}
+            </div>
+            <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+              {billingTilesFor(query.data).map((t) => (
+                <StatTile key={t.label} tile={t} />
+              ))}
+            </div>
           </section>
           <PlanMix counts={query.data.plan_counts} />
         </>

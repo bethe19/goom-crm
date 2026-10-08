@@ -45,6 +45,7 @@ import {
   matchesCommand,
   MIN_SEARCH_LENGTH,
   pushRecent,
+  recentRecordsKey,
   useGlobalSearch,
   type SearchHit,
   type SearchKind,
@@ -74,12 +75,11 @@ interface Command {
 
 /* ------------------------------------------------------------------ recent items (localStorage) */
 
-const recentKey = (userId: string) => `goom:recent-records:${userId}`;
-
-function readRecent(userId: string | undefined): SearchHit[] {
-  if (!userId) return [];
+// Keyed per user *and* workspace (recentRecordsKey returns null until both are known).
+function readRecent(key: string | null): SearchHit[] {
+  if (!key) return [];
   try {
-    const raw = localStorage.getItem(recentKey(userId));
+    const raw = localStorage.getItem(key);
     const parsed = raw ? JSON.parse(raw) : [];
     return Array.isArray(parsed) ? parsed.filter((h) => h && h.id && h.kind in KIND_META) : [];
   } catch {
@@ -87,10 +87,10 @@ function readRecent(userId: string | undefined): SearchHit[] {
   }
 }
 
-function writeRecent(userId: string | undefined, list: SearchHit[]) {
-  if (!userId) return;
+function writeRecent(key: string | null, list: SearchHit[]) {
+  if (!key) return;
   try {
-    localStorage.setItem(recentKey(userId), JSON.stringify(list));
+    localStorage.setItem(key, JSON.stringify(list));
   } catch {
     /* storage unavailable (private mode) — recents are a convenience only */
   }
@@ -138,11 +138,12 @@ export function GlobalSearch({ open, onOpenChange, onShowShortcuts, onOpenFeedba
   const [recent, setRecent] = useState<SearchHit[]>([]);
   const debounced = useDebounce(query, 200);
   const search = useGlobalSearch(debounced);
+  const recentKey = recentRecordsKey(user?.id, organization?.id);
 
   useEffect(() => {
-    if (open) setRecent(readRecent(user?.id));
+    if (open) setRecent(readRecent(recentKey));
     else setQuery("");
-  }, [open, user?.id]);
+  }, [open, recentKey]);
 
   const close = useCallback(() => onOpenChange(false), [onOpenChange]);
 
@@ -155,8 +156,8 @@ export function GlobalSearch({ open, onOpenChange, onShowShortcuts, onOpenFeedba
   );
 
   const openHit = (hit: SearchHit) => {
-    const next = pushRecent(readRecent(user?.id), hit);
-    writeRecent(user?.id, next);
+    const next = pushRecent(readRecent(recentKey), hit);
+    writeRecent(recentKey, next);
     go(hitHref(hit));
   };
 

@@ -28,10 +28,7 @@ interface Step {
   description: string;
   icon: typeof Handshake;
   done: boolean;
-  to?: string;
-  onClick?: () => void;
-  pending?: boolean;
-  pendingLabel?: string;
+  to: string;
 }
 
 /**
@@ -41,8 +38,6 @@ interface Step {
 export function GetStartedCard({ hasDeals, loading }: { hasDeals: boolean; loading?: boolean }) {
   const { organization, canManage, hasFeature } = useAuth();
   const canImport = hasFeature("csv_import");
-  const { toast } = useToast();
-  const queryClient = useQueryClient();
   const orgId = organization?.id;
   const [dismissed, setDismissed] = useState(() => readDismissed(orgId));
 
@@ -109,14 +104,14 @@ export function GetStartedCard({ hasDeals, loading }: { hasDeals: boolean; loadi
             Get started
           </h2>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            {doneCount} of {required.length} done
+            {doneCount} of {steps.length} done
           </p>
         </div>
         <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground" onClick={dismiss} aria-label="Hide getting started checklist">
           <X className="h-4 w-4" />
         </Button>
       </div>
-      <Progress value={(doneCount / required.length) * 100} className="mt-3 h-1.5" aria-label="Setup progress" />
+      <Progress value={(doneCount / steps.length) * 100} className="mt-3 h-1.5" aria-label="Setup progress" />
 
       <ul className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
         {steps.map((s) => {
@@ -129,9 +124,7 @@ export function GetStartedCard({ hasDeals, loading }: { hasDeals: boolean; loadi
                   s.done ? "border-foreground bg-foreground text-background" : "border-border bg-secondary text-foreground",
                 )}
               >
-                {s.pending ? (
-                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-                ) : s.done ? (
+                {s.done ? (
                   <Check className="h-4 w-4" aria-hidden />
                 ) : (
                   <Icon className="h-4 w-4" aria-hidden />
@@ -139,27 +132,23 @@ export function GetStartedCard({ hasDeals, loading }: { hasDeals: boolean; loadi
               </span>
               <span className="min-w-0 flex-1">
                 <span className={cn("block text-sm font-medium", s.done ? "text-muted-foreground line-through" : "text-foreground")}>
-                  {s.pending ? s.pendingLabel : s.title}
+                  {s.title}
                 </span>
                 <span className="block text-xs text-muted-foreground">{s.done ? "Done" : s.description}</span>
               </span>
-              {!s.done && !s.pending && <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />}
+              {!s.done && <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />}
             </>
           );
           const cls =
-            "flex h-full w-full items-center gap-3 rounded-lg border border-border p-3 text-left transition-colors duration-150 hover:bg-secondary/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-70";
+            "flex h-full w-full items-center gap-3 rounded-lg border border-border p-3 text-left transition-colors duration-150 hover:bg-secondary/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
           return (
             <li key={s.id}>
               {s.done ? (
                 <div className={cn(cls, "hover:bg-transparent")}>{content}</div>
-              ) : s.to ? (
+              ) : (
                 <Link to={s.to} className={cls}>
                   {content}
                 </Link>
-              ) : (
-                <button type="button" className={cls} onClick={s.onClick} disabled={s.pending} aria-busy={s.pending}>
-                  {content}
-                </button>
               )}
             </li>
           );

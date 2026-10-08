@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
+import { useIsMutating } from "@tanstack/react-query";
 import { format } from "date-fns";
 import { Activity as ActivityIcon, CheckSquare, History, Loader2, Lock, MoreHorizontal, NotebookPen, RotateCcw, Trash2, Trophy, XCircle } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
-import { useDeal, useDeleteDeal, useMoveDeal, useUpdateDeal, type Deal } from "@/hooks/useDeals";
+import { DEAL_MOVE_KEY, useDeal, useDeleteDeal, useMoveDeal, useUpdateDeal, type Deal, type MoveDealInput } from "@/hooks/useDeals";
 import { stageOutcome, usePipelineStages, type PipelineStage } from "@/hooks/usePipelineStages";
 import { useActivities, type Activity } from "@/hooks/useActivities";
 import { useTasks } from "@/hooks/useTasks";
@@ -32,7 +33,7 @@ import { FieldShell, InlineField } from "./InlineField";
 import { useSaveStatus } from "./useSaveStatus";
 import { LostReasonDialog } from "./LostReasonDialog";
 import { CompanyPicker, ContactPicker, MemberPicker } from "./pickers";
-import { isDealOverdue } from "./dealUtils";
+import { isDealOverdue, parseDealValue } from "./dealUtils";
 import { memberName, useWorkspaceMembers, type WorkspaceMember } from "./useWorkspaceMembers";
 
 interface DealDetailSheetProps {
@@ -48,11 +49,22 @@ interface DealDetailSheetProps {
 export function DealDetailSheet({ deal: dealProp, dealId, open, onOpenChange, stages: stagesProp }: DealDetailSheetProps) {
   const id = dealProp?.id ?? dealId ?? null;
   const { data: live, isLoading, error, refetch } = useDeal(open ? id : null, { initialData: dealProp });
-  const deal = live === undefined ? dealProp : live;
+  const current = live === undefined ? dealProp : live;
+  // The parent clears the deal on close: keep showing the last one while the sheet animates out
+  // (otherwise "This deal no longer exists" flashes for the length of the animation).
+  const [lastDeal, setLastDeal] = useState<Deal | null>(current ?? null);
+  if (current && current !== lastDeal) setLastDeal(current);
+  const deal = current ?? (open ? null : lastDeal);
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent className="flex w-full flex-col gap-0 overflow-hidden p-0 sm:max-w-xl">
+      <SheetContent
+        className="flex w-full flex-col gap-0 overflow-hidden p-0 sm:max-w-xl"
+        onEscapeKeyDown={(e) => {
+          // Escape in an inline editor cancels that edit only, not the whole sheet.
+          if (e.target instanceof Element && e.target.closest("[data-inline-editing]")) e.preventDefault();
+        }}
+      >
         {deal ? (
           <DealDetailBody key={deal.id} deal={deal} stagesProp={stagesProp} onClose={() => onOpenChange(false)} />
         ) : isLoading ? (
@@ -88,6 +100,10 @@ function DealDetailBody({ deal, stagesProp, onClose }: { deal: Deal; stagesProp?
   const confirm = useConfirm();
   const updateDeal = useUpdateDeal();
   const moveDeal = useMoveDeal();
+  // Any queued move of this deal (from here or the board's Undo) blocks starting another one.
+  const moving =
+    useIsMutating({ mutationKey: DEAL_MOVE_KEY, predicate: (m) => (m.state.variables as MoveDealInput | undefined)?.deal.id === deal.id }) > 0 ||
+    moveDeal.isPending;
   const deleteDeal = useDeleteDeal();
   const { byId } = useWorkspaceMembers();
   const { data: fetchedStages } = usePipelineStages(deal.pipeline_id);
@@ -117,7 +133,7 @@ function DealDetailBody({ deal, stagesProp, onClose }: { deal: Deal; stagesProp?
   const move = async (target: PipelineStage, lostReason?: string) => {
     await stageStatus.run(async () => {
       try {
-        await moveDeal.mutateAsync({ deal, stage: target, lostReason });
+        await moveDeal.mutateAsync({ deal, stage: target, lostReason, fromStage: stage });
         toast({ title: target.is_won ? "Deal won" : target.is_lost ? "Deal marked as lost" : `Moved to ${target.name}`, variant: "success" });
       } catch (err) {
         toast({ title: "Couldn't move deal", description: errorMessage(err), variant: "destructive" });
@@ -127,7 +143,7 @@ function DealDetailBody({ deal, stagesProp, onClose }: { deal: Deal; stagesProp?
   };
 
   const requestMove = (target: PipelineStage) => {
-    if (target.id === deal.stage_id) return;
+    if (target.id === deal.stage_id || moving) return;
     if (target.is_lost) setLostPrompt(target);
     else void move(target);
   };
@@ -169,21 +185,21 @@ function DealDetailBody({ deal, stagesProp, onClose }: { deal: Deal; stagesProp?
         />
         <div className="flex flex-wrap items-center gap-2">
           {outcome === "open" && wonStage && (
-            <Button size="sm" variant="outline" className="gap-1.5" onClick={() => requestMove(wonStage)} disabled={moveDeal.isPending}>
+            <Button size="sm" variant="outline" className="gap-1.5" onClick={() => requestMove(wonStage)} disabled={moving}>
               <Trophy className="h-4 w-4" aria-hidden /> Mark won
             </Button>
           )}
           {outcome === "open" && lostStage && (
-            <Button size="sm" variant="outline" className="gap-1.5" onClick={() => requestMove(lostStage)} disabled={moveDeal.isPending}>
+            <Button size="sm" variant="outline" className="gap-1.5" onClick={() => requestMove(lostStage)} disabled={moving}>
               <XCircle className="h-4 w-4" aria-hidden /> Mark lost
             </Button>
           )}
           {outcome !== "open" && reopenStage && (
-            <Button size="sm" variant="outline" className="gap-1.5" onClick={() => requestMove(reopenStage)} disabled={moveDeal.isPending}>
+            <Button size="sm" variant="outline" className="gap-1.5" onClick={() => requestMove(reopenStage)} disabled={moving}>
               <RotateCcw className="h-4 w-4" aria-hidden /> Reopen
             </Button>
           )}
-          {moveDeal.isPending && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" aria-label="Saving" />}
+          {moving && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" aria-label="Saving" />}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button size="icon" variant="ghost" className="ml-auto h-9 w-9" aria-label="More actions">
@@ -225,12 +241,14 @@ function DealDetailBody({ deal, stagesProp, onClose }: { deal: Deal; stagesProp?
               <InlineField
                 id="deal-value-inline"
                 label={`Value (${currency ?? "ETB"})`}
-                type="number"
                 value={String(deal.value ?? 0)}
                 display={<span className="font-medium tabular-nums">{formatCurrency(deal.value, currency)}</span>}
-                validate={(v) => (v === "" || Number.isNaN(Number(v)) || Number(v) < 0 ? "Enter an amount of 0 or more" : null)}
-                onSave={(v) => save({ value: Number(v) })}
-                inputProps={{ min: 0, step: "any", inputMode: "decimal" }}
+                validate={(v) => {
+                  const { value, error } = parseDealValue(v);
+                  return error ?? (value === null ? "Enter an amount of 0 or more" : null);
+                }}
+                onSave={(v) => save({ value: parseDealValue(v).value ?? 0 })}
+                inputProps={{ inputMode: "decimal", autoComplete: "off", className: "h-9 text-sm tabular-nums" }}
               />
               <InlineField
                 id="deal-probability-inline"
@@ -243,7 +261,7 @@ function DealDetailBody({ deal, stagesProp, onClose }: { deal: Deal; stagesProp?
                 inputProps={{ min: 0, max: 100, inputMode: "numeric" }}
               />
               <FieldShell label="Stage" htmlFor="deal-stage-select" status={stageStatus.status}>
-                <Select value={deal.stage_id} onValueChange={(id) => { const s = stages.find((x) => x.id === id); if (s) requestMove(s); }}>
+                <Select value={deal.stage_id} disabled={moving} onValueChange={(id) => { const s = stages.find((x) => x.id === id); if (s) requestMove(s); }}>
                   <SelectTrigger id="deal-stage-select" className="h-9 text-sm">
                     <SelectValue />
                   </SelectTrigger>
@@ -342,7 +360,7 @@ function DealDetailBody({ deal, stagesProp, onClose }: { deal: Deal; stagesProp?
         open={!!lostPrompt}
         dealTitle={deal.title}
         stageName={lostPrompt?.name}
-        pending={moveDeal.isPending}
+        pending={moving}
         onCancel={() => setLostPrompt(null)}
         onConfirm={async (reason) => {
           const target = lostPrompt;

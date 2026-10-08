@@ -81,6 +81,7 @@ function DealCardImpl({
               size="icon"
               className="relative z-10 -mr-1.5 -mt-1 h-7 w-7 shrink-0 rounded-md text-muted-foreground opacity-100 focus-visible:opacity-100 sm:opacity-0 sm:group-hover:opacity-100 data-[state=open]:opacity-100"
               aria-label={`Actions for ${deal.title}`}
+              data-deal-actions=""
             >
               <MoreHorizontal className="h-4 w-4" />
             </Button>

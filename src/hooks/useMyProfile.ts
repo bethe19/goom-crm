@@ -3,18 +3,20 @@ import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
 import type { Json, TablesUpdate } from "@/integrations/supabase/types";
 
+/**
+ * In-app notification switches read by the database triggers (missing key = on):
+ * `deal_stage_changes` → "Deal won" / "Deal lost" for the deal's owner;
+ * `task_reminders` → "Task assigned to you" when a teammate assigns a task.
+ * (Key names are kept for compatibility with stored preferences.)
+ */
 export interface NotificationPreferences {
   deal_stage_changes: boolean;
   task_reminders: boolean;
-  mentions: boolean;
-  weekly_digest: boolean;
 }
 
 export const NOTIFICATION_DEFAULTS: NotificationPreferences = {
   deal_stage_changes: true,
   task_reminders: true,
-  mentions: true,
-  weekly_digest: false,
 };
 
 export interface MyProfile {
@@ -33,6 +35,35 @@ export type ProfilePatch = Partial<
 >;
 
 export const myProfileKey = (userId: string | undefined) => ["my-profile", userId] as const;
+
+export const AVATAR_BUCKET = "avatars";
+const AVATAR_EXTENSIONS = ["jpg", "png", "gif", "webp"] as const;
+
+/** The one storage object a user's photo lives at: `<uid>/avatar.<jpg|png|gif|webp>` (what storage RLS allows). */
+export function avatarPath(userId: string, mimeType: string): string {
+  const sub = mimeType.split("/")[1] ?? "";
+  const ext = sub === "jpeg" ? "jpg" : sub;
+  return `${userId}/avatar.${ext}`;
+}
+
+/**
+ * Deletes the user's avatar objects — everything listed in their `<uid>/` folder plus the canonical
+ * `avatar.<ext>` names (in case listing isn't allowed) — except `keep`. Removing a path that doesn't
+ * exist is a no-op. Throws if storage rejects the delete.
+ */
+export async function removeAvatarFiles(userId: string, keep?: string): Promise<void> {
+  const bucket = supabase.storage.from(AVATAR_BUCKET);
+  const paths = new Set<string>(AVATAR_EXTENSIONS.map((ext) => `${userId}/avatar.${ext}`));
+  const { data: listed, error: listError } = await bucket.list(userId, { limit: 100 });
+  if (!listError) {
+    // Folders come back with a null id; only files can be removed.
+    for (const object of listed ?? []) if (object.id) paths.add(`${userId}/${object.name}`);
+  }
+  if (keep) paths.delete(keep);
+  if (paths.size === 0) return;
+  const { error } = await bucket.remove([...paths]);
+  if (error) throw error;
+}
 
 function normalize(row: Record<string, unknown>): MyProfile {
   const prefs = (row.notification_preferences ?? {}) as Partial<NotificationPreferences>;

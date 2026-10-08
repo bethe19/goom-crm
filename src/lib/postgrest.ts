@@ -18,3 +18,20 @@ export function ilikeAny(columns: string[], term: string): string | null {
 
 /** Page size used by paginated list queries. Supabase caps un-ranged responses at 1000 rows. */
 export const PAGE_SIZE = 50;
+
+/**
+ * PostgREST answers 416 / PGRST103 when a `.range()` offset is past the last row (e.g. the last
+ * page emptied after a delete). For that error returns the total row count from its details
+ * ("…but there are only 12 rows"), or 0 when it can't be read; for anything else returns null.
+ */
+export function rangeNotSatisfiableTotal(error: unknown): number | null {
+  if (!error || typeof error !== "object" || (error as { code?: unknown }).code !== "PGRST103") return null;
+  const details = (error as { details?: unknown }).details;
+  const match = typeof details === "string" ? details.match(/only (\d+) rows?/i) : null;
+  return match ? Number(match[1]) : 0;
+}
+
+/** The last page index that holds rows for `total` rows (0 when empty). */
+export function lastPageIndex(total: number, pageSize: number = PAGE_SIZE): number {
+  return Math.max(0, Math.ceil(total / pageSize) - 1);
+}

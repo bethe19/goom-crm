@@ -11,6 +11,8 @@ import {
   FEATURE_LABELS,
   PLANS,
   PLAN_ORDER,
+  TRIAL_AI_REQUESTS_PER_MONTH,
+  TRIAL_DAYS,
   formatLimit,
   planHasFeature,
   type Plan,
@@ -19,7 +21,8 @@ import {
   type PlanLimits,
 } from "@/lib/plans";
 
-const POPULAR: PlanId = "growth";
+/** Our suggestion for most teams (a recommendation, not a popularity claim). */
+const RECOMMENDED: PlanId = "growth";
 
 const LIMIT_ROWS: { key: keyof PlanLimits; label: string; icon: typeof UserRound }[] = [
   { key: "seats", label: "Users", icon: UserRound },
@@ -134,16 +137,20 @@ function CellValue({ value, emphasize }: { value: Cell; emphasize?: boolean }) {
 /* ------------------------------------------------------------------ FAQ */
 
 const money = (n: number) => `$${n}`;
-const etbMoney = (n: number) => new Intl.NumberFormat(undefined, { style: "currency", currency: "ETB", minimumFractionDigits: 0 }).format(n * 120);
+const priceList = PLAN_ORDER.map((id) => `${PLANS[id].name} ${money(PLANS[id].price)}`).join(", ");
 
 const FAQS: { q: string; a: ReactNode }[] = [
   {
-    q: "Do I pay anything during the beta?",
-    a: "No. Billing isn't live yet, so we never ask for a card. During the beta, workspace admins can switch between Starter, Growth and Enterprise in Settings at no charge, and the plan's limits and features apply straight away.",
+    q: "How does the free trial work?",
+    a: `Every new workspace gets a ${TRIAL_DAYS}-day free trial, no card required. During the trial, workspace admins can switch between Starter, Growth and Enterprise in Settings as often as they like, and the plan's limits and features apply straight away. Trials include up to ${formatLimit(TRIAL_AI_REQUESTS_PER_MONTH)} AI assistant requests a month.`,
   },
   {
-    q: "What will the plans cost?",
-    a: `Once billing launches: ${PLAN_ORDER.map((id) => `${PLANS[id].name} ${money(PLANS[id].price)}`).join(", ")} per workspace per month. We'll announce the launch date in advance. Because we don't hold payment details, nothing can be charged automatically.`,
+    q: "How do we pay?",
+    a: `Before the trial ends, an admin chooses a plan in Settings → Plan & usage and requests it. We email payment details for an invoice or bank transfer, and activate the plan as soon as payment is confirmed. Prices per workspace per month: ${priceList}. We never ask for a card, so nothing is charged automatically.`,
+  },
+  {
+    q: "What happens if the trial ends before we pay?",
+    a: "Your workspace is paused, not deleted. Your data is kept, but nobody can open the workspace until a plan is active. Once payment is confirmed it reopens exactly as you left it. The same applies if a paid period ends without being renewed.",
   },
   {
     q: "How do limits work?",
@@ -155,15 +162,15 @@ const FAQS: { q: string; a: ReactNode }[] = [
   },
   {
     q: "Can we switch plans later?",
-    a: "Yes. Admins can change the plan at any time from Settings. Upgrades apply immediately. You can move to a smaller plan when your current usage fits within its limits; if it doesn't, we tell you which limit is over so you can tidy up first.",
+    a: "Yes. During the trial, admins can switch freely. On a paid plan, an admin can move to a smaller plan from Settings at any time, as long as current usage fits within its limits (if it doesn't, we tell you which limit is over so you can tidy up first). Upgrades are requested in Settings and start as soon as payment is confirmed.",
   },
   {
     q: "Can I export my data?",
-    a: `CSV export of contacts, companies and deals is included on ${plansWithFeature("csv_export")}, and ${plansWithFeature("workspace_backup")} adds a full workspace backup. During the beta, an admin on Starter can switch plans at no charge to export.`,
+    a: `CSV export of contacts, companies and deals is included on ${plansWithFeature("csv_export")}, and ${plansWithFeature("workspace_backup")} adds a full workspace backup. During the free trial an admin can switch to any plan, so you can try export before you pay.`,
   },
   {
     q: "Which plan should I choose when I sign up?",
-    a: "Pick the one that matches your team today — you can switch at any time. Every plan includes the pipeline, contacts, tasks, calendar, roles and the AI assistant; the differences are the limits and the extra insight, data and history features shown in the comparison above.",
+    a: "Pick the one that matches your team today — you can switch freely during the free trial. Every plan includes the pipeline, contacts, tasks, calendar, roles and the AI assistant; the differences are the limits and the extra insight, data and history features shown in the comparison above.",
   },
 ];
 
@@ -171,7 +178,7 @@ const FAQS: { q: string; a: ReactNode }[] = [
 
 export default function Pricing() {
   const { hash } = useLocation();
-  const [mobilePlan, setMobilePlan] = useState<PlanId>(POPULAR);
+  const [mobilePlan, setMobilePlan] = useState<PlanId>(RECOMMENDED);
 
   // MarketingLayout scrolls to the top on mount; honor links like /pricing#compare afterwards.
   useEffect(() => {
@@ -192,15 +199,15 @@ export default function Pricing() {
         <div className="mx-auto flex max-w-3xl gap-3 rounded-xl border border-border bg-secondary/50 p-4 text-sm">
           <Info className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
           <p className="text-foreground/85">
-            <span className="font-medium text-foreground">Billing isn't live yet.</span> During the beta, plan changes are free
-            and made in-app by your workspace admin. The prices below are what paid plans will cost once billing launches — we'll
-            let you know before that happens.
+            <span className="font-medium text-foreground">{TRIAL_DAYS}-day free trial, no card required.</span> Try any plan and switch
+            between them as you like. When you're ready, choose a plan and pay by invoice or bank transfer — we activate it as soon as
+            payment is confirmed.
           </p>
         </div>
 
         <div className="mt-10 grid gap-4 lg:grid-cols-3">
           {PLAN_ORDER.map((id) => (
-            <PlanCard key={id} plan={PLANS[id]} popular={id === POPULAR} />
+            <PlanCard key={id} plan={PLANS[id]} recommended={id === RECOMMENDED} />
           ))}
         </div>
         <p className="mt-6 text-center text-sm text-muted-foreground">
@@ -235,20 +242,20 @@ export default function Pricing() {
                       scope="col"
                       className={cn(
                         "sticky top-16 z-10 border-b border-border bg-secondary px-4 py-4 align-bottom",
-                        id === POPULAR && "bg-card",
+                        id === RECOMMENDED && "bg-card",
                       )}
                     >
                       <div className="flex items-center gap-2">
                         <span className="text-base font-semibold">{plan.name}</span>
-                        {id === POPULAR && (
-                          <span className="rounded-full bg-foreground px-2 py-0.5 text-[11px] font-medium text-background">Most popular</span>
+                        {id === RECOMMENDED && (
+                          <span className="rounded-full bg-foreground px-2 py-0.5 text-[11px] font-medium text-background">Recommended</span>
                         )}
                       </div>
                       <p className="mt-0.5 text-sm font-normal text-muted-foreground">
-                        <span className="tabular-nums">{money(plan.price)}</span>/month <span className="ml-1 text-xs opacity-80">(≈ {etbMoney(plan.price)})</span>
+                        Free for {TRIAL_DAYS} days, then <span className="tabular-nums">{money(plan.price)}</span>/month
                       </p>
-                      <Button asChild size="sm" variant={id === POPULAR ? "default" : "outline"} className="mt-3 w-full">
-                        <Link to={signupPathFor(id)}>Start on {plan.name}</Link>
+                      <Button asChild size="sm" variant={id === RECOMMENDED ? "default" : "outline"} className="mt-3 w-full">
+                        <Link to={signupPathFor(id)}>Try {plan.name} free</Link>
                       </Button>
                     </th>
                   );
@@ -273,8 +280,8 @@ export default function Pricing() {
                       {row.hint && <span className="mt-0.5 block text-xs text-muted-foreground">{row.hint}</span>}
                     </th>
                     {PLAN_ORDER.map((id) => (
-                      <td key={id} className={cn("border-b border-border px-4 py-3 align-top", id === POPULAR && "bg-card")}>
-                        <CellValue value={row.value(PLANS[id])} emphasize={id === POPULAR} />
+                      <td key={id} className={cn("border-b border-border px-4 py-3 align-top", id === RECOMMENDED && "bg-card")}>
+                        <CellValue value={row.value(PLANS[id])} emphasize={id === RECOMMENDED} />
                       </td>
                     ))}
                   </tr>
@@ -309,11 +316,11 @@ export default function Pricing() {
                 <div>
                   <p className="font-semibold">{PLANS[mobilePlan].name}</p>
                   <p className="text-sm text-muted-foreground">
-                    <span className="tabular-nums">{money(PLANS[mobilePlan].price)}</span>/month <span className="ml-1 text-xs opacity-80">(≈ {etbMoney(PLANS[mobilePlan].price)})</span>
+                    Free for {TRIAL_DAYS} days, then <span className="tabular-nums">{money(PLANS[mobilePlan].price)}</span>/month
                   </p>
                 </div>
-                <Button asChild size="sm" variant={mobilePlan === POPULAR ? "default" : "outline"}>
-                  <Link to={signupPathFor(mobilePlan)}>Start on {PLANS[mobilePlan].name}</Link>
+                <Button asChild size="sm" variant={mobilePlan === RECOMMENDED ? "default" : "outline"}>
+                  <Link to={signupPathFor(mobilePlan)}>Try {PLANS[mobilePlan].name} free</Link>
                 </Button>
               </div>
               {COMPARE.map((group) => (
@@ -363,35 +370,33 @@ export default function Pricing() {
   );
 }
 
-function PlanCard({ plan, popular }: { plan: Plan; popular: boolean }) {
+function PlanCard({ plan, recommended }: { plan: Plan; recommended: boolean }) {
   return (
     <article
       aria-labelledby={`plan-${plan.id}`}
       className={cn(
         "relative flex flex-col rounded-xl border bg-card p-6 sm:p-8",
-        popular ? "border-foreground shadow-md" : "border-border",
+        recommended ? "border-foreground shadow-md" : "border-border",
       )}
     >
       <div className="flex items-center justify-between gap-2">
         <h2 id={`plan-${plan.id}`} className="text-lg font-semibold tracking-tight">
           {plan.name}
         </h2>
-        {popular && <span className="rounded-full bg-foreground px-2.5 py-0.5 text-xs font-medium text-background">Most popular</span>}
+        {recommended && <span className="rounded-full bg-foreground px-2.5 py-0.5 text-xs font-medium text-background">Recommended</span>}
       </div>
       <p className="mt-2 text-sm text-muted-foreground lg:min-h-[60px]">{plan.tagline}</p>
 
-      <div className="mt-6 flex flex-col gap-1">
-        <div className="flex items-baseline gap-1.5">
-          <span className="text-4xl font-semibold tracking-tight tabular-nums">{money(plan.price)}</span>
-          <span className="text-sm text-muted-foreground">/ month per workspace</span>
-        </div>
-        <p className="text-sm font-medium text-muted-foreground">≈ {etbMoney(plan.price)} / month</p>
+      <p className="mt-6 text-sm font-medium text-foreground">{TRIAL_DAYS}-day free trial, no card required</p>
+      <div className="mt-1 flex items-baseline gap-1.5">
+        <span className="text-sm text-muted-foreground">then</span>
+        <span className="text-4xl font-semibold tracking-tight tabular-nums">{money(plan.price)}</span>
+        <span className="text-sm text-muted-foreground">/ month per workspace</span>
       </div>
-      <p className="mt-1 text-xs text-muted-foreground">Free while billing is in beta</p>
 
-      <Button asChild className="mt-6 w-full" variant={popular ? "default" : "outline"}>
+      <Button asChild className="mt-6 w-full" variant={recommended ? "default" : "outline"}>
         <Link to={signupPathFor(plan.id)}>
-          Start on {plan.name} <ArrowRight className="ml-1.5 h-4 w-4" aria-hidden="true" />
+          Try {plan.name} free <ArrowRight className="ml-1.5 h-4 w-4" aria-hidden="true" />
         </Link>
       </Button>
 

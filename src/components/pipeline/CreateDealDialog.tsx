@@ -15,6 +15,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useToast } from "@/hooks/use-toast";
 import { errorMessage } from "@/components/settings/validation";
 import { CompanyPicker, ContactPicker, MemberPicker } from "./pickers";
+import { parseDealProbability, parseDealValue, type ParsedNumber } from "./dealUtils";
 
 interface CreateDealDialogProps {
   open: boolean;
@@ -29,17 +30,18 @@ interface CreateDealDialogProps {
   onCreated?: (deal: Deal) => void;
 }
 
-const numberString = (msg: string, max?: number) =>
-  z
-    .string()
-    .trim()
-    .refine((v) => v === "" || (!Number.isNaN(Number(v)) && Number(v) >= 0 && (max === undefined || Number(v) <= max)), msg);
+/** A typed number field validated by `parse` (which owns the error message). */
+const parsedString = (parse: (raw: string) => ParsedNumber) =>
+  z.string().superRefine((v, ctx) => {
+    const { error } = parse(v);
+    if (error) ctx.addIssue({ code: z.ZodIssueCode.custom, message: error });
+  });
 
 const schema = z.object({
   title: z.string().trim().min(1, "Give the deal a name").max(200, "Keep it under 200 characters"),
   stage_id: z.string().min(1, "Choose a stage"),
-  value: numberString("Enter an amount of 0 or more"),
-  probability: numberString("Enter a number from 0 to 100", 100),
+  value: parsedString(parseDealValue),
+  probability: parsedString(parseDealProbability),
   close_date: z.string().optional(),
   company_id: z.string().nullable(),
   contact_id: z.string().nullable(),
@@ -88,17 +90,26 @@ export function CreateDealDialog({
   const { register, handleSubmit, control, reset, setValue, formState } = form;
   const { errors, dirtyFields } = formState;
 
-  // Reset whenever the dialog opens (or stages arrive while open).
+  // Reset whenever the dialog opens.
   useEffect(() => {
     if (open) reset(defaults(defaultStageId));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, defaultStageId, stages.length]);
+  }, [open, defaultStageId]);
+
+  // Stages can arrive after opening (e.g. ?new=1): fill in stage and probability without wiping what was typed.
+  useEffect(() => {
+    if (open && stages.length) reset(defaults(defaultStageId), { keepDirtyValues: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stages.length]);
 
   const onSubmit = (values: FormValues) => {
     if (!effectivePipelineId) {
       toast({ title: "No pipeline yet", description: "Create a pipeline in Settings first.", variant: "destructive" });
       return;
     }
+    const value = parseDealValue(values.value).value;
+    const probability = parseDealProbability(values.probability).value;
+    const stage = stages.find((s) => s.id === values.stage_id);
     createDeal.mutate(
       {
         title: values.title.trim(),
@@ -108,8 +119,9 @@ export function CreateDealDialog({
         created_by: user?.id,
         company_id: values.company_id,
         contact_id: values.contact_id,
-        value: values.value === "" ? 0 : Number(values.value),
-        probability: values.probability === "" ? 0 : Math.round(Number(values.probability)),
+        value: value ?? 0,
+        // Blank probability: the stage's default, not 0%.
+        probability: probability ?? defaultProbabilityForStage(stage),
         close_date: values.close_date || null,
         notes: values.notes?.trim() || null,
       },
@@ -183,7 +195,7 @@ export function CreateDealDialog({
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="deal-value">Value ({organization?.currency ?? "ETB"})</Label>
-              <Input id="deal-value" type="number" inputMode="decimal" min={0} step="any" placeholder="0" className="tabular-nums" aria-invalid={!!errors.value} {...register("value")} />
+              <Input id="deal-value" inputMode="decimal" autoComplete="off" placeholder="0" className="tabular-nums" aria-invalid={!!errors.value} {...register("value")} />
               {errors.value && <p className="text-xs text-destructive">{errors.value.message}</p>}
             </div>
           </div>
@@ -228,7 +240,15 @@ export function CreateDealDialog({
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="deal-probability">Probability (%)</Label>
-              <Input id="deal-probability" type="number" inputMode="numeric" min={0} max={100} className="tabular-nums" aria-invalid={!!errors.probability} {...register("probability")} />
+              <Input
+                id="deal-probability"
+                inputMode="numeric"
+                autoComplete="off"
+                placeholder={String(defaultProbabilityForStage(stages.find((s) => s.id === form.watch("stage_id"))))}
+                className="tabular-nums"
+                aria-invalid={!!errors.probability}
+                {...register("probability")}
+              />
               {errors.probability && <p className="text-xs text-destructive">{errors.probability.message}</p>}
             </div>
             <div className="space-y-1.5">

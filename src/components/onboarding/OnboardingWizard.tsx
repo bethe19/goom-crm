@@ -12,11 +12,11 @@ import { useMyProfile, useUpdateMyProfile } from "@/hooks/useMyProfile";
 import { useCompleteOnboarding } from "@/hooks/useOnboardingStatus";
 import { useUpdateOrganization } from "@/hooks/useOrganization";
 import { useSetWorkspacePlan } from "@/hooks/usePlan";
-import { PLANS } from "@/lib/plans";
+import { PLANS, isPlanId, minimumPlanFor } from "@/lib/plans";
 import { clearSelectedPlan, readSelectedPlan } from "./selectedPlan";
 import { LimitNotice } from "@/components/settings/UpgradePrompt";
 import { usePipelines, usePipelineStages } from "@/hooks/usePipelineStages";
-import { createInvitation, type CreatedInvitation } from "@/hooks/useTeam";
+import { createInvitation, invitationsKey, type CreatedInvitation } from "@/hooks/useTeam";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -39,10 +39,12 @@ const MEMBER_STEPS: StepId[] = ["profile", "done"];
 
 /** First-run setup. Every exit path (finish or skip) calls `complete_onboarding()` so it never shows again. */
 export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
-  const { isAdmin, organization } = useAuth();
+  const { isAdmin, organization, user } = useAuth();
   const navigate = useNavigate();
   const complete = useCompleteOnboarding();
-  const steps = isAdmin ? ADMIN_STEPS : MEMBER_STEPS;
+  // Someone invited as an admin joins an existing workspace: the founder's setup steps aren't theirs.
+  const invited = !!user?.user_metadata?.invite_token;
+  const steps = isAdmin && !invited ? ADMIN_STEPS : MEMBER_STEPS;
   const [index, setIndex] = useState(0);
   const [finishing, setFinishing] = useState(false);
   const step = steps[index];
@@ -266,7 +268,7 @@ const workspaceSchema = z.object({
 });
 
 function WorkspaceStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }) {
-  const { organization, can } = useAuth();
+  const { organization, can, user } = useAuth();
   const update = useUpdateOrganization();
   const setPlan = useSetWorkspacePlan();
   const { register, handleSubmit, formState, setValue, watch } = useForm<z.infer<typeof workspaceSchema>>({
@@ -277,7 +279,9 @@ function WorkspaceStep({ onBack, onNext }: { onBack: () => void; onNext: () => v
 
   /** Applies the plan picked on the pricing page (if any). Never blocks onboarding. */
   const applySelectedPlan = async () => {
-    const selected = readSelectedPlan();
+    // Same tab: sessionStorage. Confirmation link opened in a new tab: the sign-up metadata.
+    const fromSignup = user?.user_metadata?.selected_plan;
+    const selected = readSelectedPlan() ?? (isPlanId(fromSignup) ? fromSignup : null);
     if (!selected) return;
     clearSelectedPlan();
     if (!can("workspace.billing") || selected === organization?.plan) return;
@@ -413,6 +417,7 @@ interface InviteRow {
 }
 
 function TeamStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }) {
+  const queryClient = useQueryClient();
   const [rows, setRows] = useState<InviteRow[]>([{ key: 0, email: "", role: "rep" }]);
   const [sending, setSending] = useState(false);
   const [created, setCreated] = useState<CreatedInvitation[]>([]);
@@ -449,6 +454,10 @@ function TeamStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }
       }
     }
     setSending(false);
+    if (results.length) {
+      queryClient.invalidateQueries({ queryKey: invitationsKey });
+      queryClient.invalidateQueries({ queryKey: ["workspace-usage"] });
+    }
     setCreated((c) => [...c, ...results]);
     setRows(failed.length ? failed : [{ key: nextKey.current++, email: "", role: "rep" }]);
     if (results.length) toast.success(`${results.length} invitation${results.length === 1 ? "" : "s"} created`);
@@ -465,7 +474,11 @@ function TeamStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm">{inv.email}</p>
                   <p className="text-xs text-muted-foreground">
-                    {inv.emailSent ? "Email sent — you can also share the link." : "No email sent — copy the link and share it."}
+                    {inv.emailSent
+                      ? "Email sent — you can also share the link."
+                      : inv.emailError
+                        ? `No email sent (${inv.emailError}) — copy the link and share it.`
+                        : "No email sent — copy the link and share it."}
                   </p>
                 </div>
                 <CopyButton value={inv.link} iconOnly label={`Copy invite link for ${inv.email}`} />
@@ -570,6 +583,9 @@ function StartStep({
   finishing: boolean;
   onFinish: (to?: string) => Promise<void>;
 }) {
+  const { hasFeature } = useAuth();
+  const canImport = hasFeature("csv_import");
+  const importPlan = minimumPlanFor("csv_import").name;
   const options = [
     {
       icon: LayoutDashboard,
@@ -581,9 +597,11 @@ function StartStep({
     {
       icon: FileSpreadsheet,
       title: "Import from Excel or CSV",
-      description: "Bring existing contacts, companies, or deals using our official pre-formatted templates.",
-      onClick: () => onFinish("/data"),
-      badge: "Templates ready",
+      description: canImport
+        ? "Bring existing contacts, companies, or deals using our official pre-formatted templates."
+        : `Spreadsheet import is included on the ${importPlan} plan. You can switch plans in Settings.`,
+      onClick: () => onFinish(canImport ? "/data" : "/settings?tab=billing"),
+      badge: canImport ? "Templates ready" : importPlan,
     },
   ];
 

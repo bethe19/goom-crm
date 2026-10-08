@@ -2,9 +2,11 @@ import { describe, it, expect, vi } from "vitest";
 
 vi.mock("@/integrations/supabase/client", () => ({ supabase: {} }));
 
+import { formatCompactCurrency, formatCurrency, formatDate, formatFriendlyDate, toDate } from "@/lib/formatters";
 import {
   type AnalyticsDeal,
   type AnalyticsStage,
+  AnalyticsRowLimitError,
   activityCountsByType,
   activityHeatmap,
   activityMixSeries,
@@ -183,6 +185,16 @@ describe("periods & deltas", () => {
     expect(prev.end).toEqual(new Date(2026, 7, 16));
     expect(getPreviousPeriodRange("last_month", NOW)).toEqual({ start: new Date(2026, 6, 1), end: new Date(2026, 7, 1) });
   });
+
+  it("keeps last month's final day when this month is longer", () => {
+    // Oct 30 ↔ Sep 30 (Sep's last day), so the comparison is all of September.
+    expect(getPreviousPeriodRange("this_month", new Date(2026, 9, 30, 15))).toEqual({ start: new Date(2026, 8, 1), end: new Date(2026, 9, 1) });
+    // Mar 29 ↔ Feb 28 in a non-leap year: all of February.
+    expect(getPreviousPeriodRange("this_month", new Date(2026, 2, 29, 9))).toEqual({ start: new Date(2026, 1, 1), end: new Date(2026, 2, 1) });
+    // Day for day otherwise, and the 31st never spills into the current month.
+    expect(getPreviousPeriodRange("this_month", new Date(2026, 9, 29))).toEqual({ start: new Date(2026, 8, 1), end: new Date(2026, 8, 30) });
+    expect(getPreviousPeriodRange("this_month", new Date(2026, 9, 31, 23))).toEqual({ start: new Date(2026, 8, 1), end: new Date(2026, 9, 1) });
+  });
 });
 
 describe("stageBreakdown", () => {
@@ -247,16 +259,45 @@ describe("activityCountsByType", () => {
 });
 
 describe("fetchAll", () => {
+  const source = (n: number) => {
+    const all = Array.from({ length: n }, (_, i) => i);
+    return async (from: number, to: number) => ({ data: all.slice(from, to + 1), error: null });
+  };
+
   it("pages until a short page and surfaces errors", async () => {
     const all = Array.from({ length: 5 }, (_, i) => i);
     const calls: [number, number][] = [];
-    const rows = await fetchAll<number>(async (from, to) => {
-      calls.push([from, to]);
-      return { data: all.slice(from, to + 1), error: null };
-    }, 2);
+    const rows = await fetchAll<number>(
+      async (from, to) => {
+        calls.push([from, to]);
+        return { data: all.slice(from, to + 1), error: null };
+      },
+      { pageSize: 2 },
+    );
     expect(rows).toEqual(all);
     expect(calls).toEqual([[0, 1], [2, 3], [4, 5]]);
     await expect(fetchAll(async () => ({ data: null, error: new Error("boom") }))).rejects.toThrow("boom");
+  });
+
+  it("throws past the row limit instead of silently dropping rows", async () => {
+    await expect(fetchAll<number>(source(4), { pageSize: 2, maxRows: 4 })).resolves.toHaveLength(4);
+    await expect(fetchAll<number>(source(5), { pageSize: 2, maxRows: 4 })).rejects.toBeInstanceOf(AnalyticsRowLimitError);
+    await expect(fetchAll<number>(source(5), { pageSize: 2, maxRows: 4 })).rejects.toThrow("more than 4 records");
+  });
+
+  it("stops paging once the query's signal aborts", async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    const run = fetchAll<number>(
+      async () => {
+        calls += 1;
+        if (calls === 2) controller.abort();
+        return { data: [1, 2], error: null };
+      },
+      { pageSize: 2, signal: controller.signal },
+    );
+    await expect(run).rejects.toBeDefined();
+    expect(calls).toBe(2);
   });
 });
 
@@ -417,5 +458,42 @@ describe("deal risk & attainment", () => {
       NOW,
     );
     expect(f.months.map((m) => m.won)).toEqual([700, 0]);
+  });
+});
+
+describe("formatters", () => {
+  it("formats bare dates as local calendar days, even west of UTC", () => {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    process.env.TZ = "America/Los_Angeles"; // where new Date("2026-10-07") is Oct 6, 5 pm
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 9, 7, 12));
+    try {
+      const d = toDate("2026-10-07");
+      expect([d.getFullYear(), d.getMonth(), d.getDate(), d.getHours()]).toEqual([2026, 9, 7, 0]);
+      expect(formatDate("2026-10-07")).toBe("Oct 7, 2026");
+      expect(formatFriendlyDate("2026-10-07")).toBe("Today");
+      expect(formatFriendlyDate("2026-10-08")).toBe("Tomorrow");
+      expect(formatFriendlyDate("2027-01-05")).toBe("Jan 5, 2027");
+      // Timestamps are still parsed as instants.
+      expect(formatDate("2026-10-07T03:00:00Z")).toBe("Oct 6, 2026");
+    } finally {
+      vi.useRealTimers();
+      process.env.TZ = tz;
+    }
+  });
+
+  it("falls back to the passed currency when compact notation is unavailable", () => {
+    const RealNumberFormat = Intl.NumberFormat;
+    const spy = vi.spyOn(Intl, "NumberFormat").mockImplementation(function (locales?: string | string[], options?: Intl.NumberFormatOptions) {
+      if (options?.notation === "compact") throw new RangeError("compact notation unsupported");
+      return new RealNumberFormat(locales, options);
+    } as unknown as typeof Intl.NumberFormat);
+    try {
+      const out = formatCompactCurrency(1234, "USD");
+      expect(out).toBe(formatCurrency(1234, "USD"));
+      expect(out).not.toContain("ETB");
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

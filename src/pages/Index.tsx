@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { addDays, addMonths, format } from "date-fns";
+import { addDays, addMonths, format, startOfDay } from "date-fns";
 import { CheckSquare, ChevronDown, DollarSign, Percent, Phone, Plus, Target, Trophy, UserPlus, Users, UserRound } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
@@ -13,7 +13,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { ErrorState } from "@/components/common/States";
 import { KpiCard } from "@/components/dashboard/KpiCard";
 import { GetStartedCard } from "@/components/dashboard/GetStartedCard";
 import { RevenueTrendChart } from "@/components/dashboard/RevenueTrendChart";
@@ -23,8 +22,9 @@ import { CloseMonthChart } from "@/components/dashboard/CloseMonthChart";
 import { ClosingSoon } from "@/components/dashboard/ClosingSoon";
 import { MyTasks } from "@/components/dashboard/MyTasks";
 import { RecentActivity } from "@/components/dashboard/RecentActivity";
-import { Segmented } from "@/components/dashboard/ChartParts";
+import { AnalyticsErrorState, Segmented } from "@/components/dashboard/ChartParts";
 import { VIZ_VARS } from "@/components/dashboard/chartTheme";
+import { useNow } from "@/hooks/useNow";
 import { formatCurrency, formatPercent } from "@/lib/formatters";
 import { cn } from "@/lib/utils";
 import {
@@ -90,7 +90,7 @@ export default function Index() {
   const fullName = profile.data || (user?.user_metadata?.full_name as string | undefined) || "";
   const firstName = fullName.trim().split(/\s+/)[0] || "";
 
-  const now = useMemo(() => new Date(), []);
+  const now = useNow();
 
   // Everything that depends only on the deals (not on the selected range / pipeline).
   const base = useMemo(() => {
@@ -122,7 +122,13 @@ export default function Index() {
     if (!data) return null;
     const { deals, stagesById } = data;
     const buckets = lastMonthsBuckets(months, now);
-    const prevBuckets = timeBuckets({ start: addMonths(buckets[0].start, -months), end: buckets[0].start }, "month");
+    // The current month is partial, so compare with the same span `months` back (through today's
+    // date that month), not with full months.
+    const prevEnd = startOfDay(addDays(addMonths(startOfDay(now), -months), 1));
+    const prevBuckets = timeBuckets(
+      { start: addMonths(buckets[0].start, -months), end: prevEnd > buckets[0].start ? buckets[0].start : prevEnd },
+      "month",
+    );
     const cur = performanceSeries(deals, stagesById, buckets);
     const prev = performanceSeries(deals, stagesById, prevBuckets);
     const range = { start: buckets[0].start, end: buckets[buckets.length - 1].end };
@@ -208,7 +214,7 @@ export default function Index() {
       {!error && <GetStartedCard hasDeals={!!base?.hasDeals} loading={loading} />}
 
       {error ? (
-        <ErrorState error={error} onRetry={retry} title="Couldn't load your dashboard" />
+        <AnalyticsErrorState error={error} onRetry={retry} title="Couldn't load your dashboard" />
       ) : (
         <>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">

@@ -72,6 +72,14 @@ export function parseSearchResults(payload: unknown): SearchHit[] {
   return hits;
 }
 
+/**
+ * localStorage key for a user's recently opened records in one workspace (records from another
+ * workspace would be dead links), or null until both are known.
+ */
+export function recentRecordsKey(userId: string | undefined, orgId: string | undefined): string | null {
+  return userId && orgId ? `goom:recent-records:${userId}:${orgId}` : null;
+}
+
 /** Most-recent-first, de-duplicated, capped list of recently opened records. */
 export function pushRecent(list: SearchHit[], hit: SearchHit, max = 6): SearchHit[] {
   const { kind, id, label, sub } = hit;

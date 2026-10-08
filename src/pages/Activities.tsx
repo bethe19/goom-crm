@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Activity as ActivityIcon, Loader2, Plus, Search, SearchX, X } from "lucide-react";
-import { ACTIVITY_TYPES, useActivitiesFeed, useActivity, useDeleteActivity, type Activity, type ActivityType } from "@/hooks/useActivities";
+import { ACTIVITY_TYPES, useActivitiesFeed, useActivity, useBulkDeleteActivities, type Activity, type ActivityType } from "@/hooks/useActivities";
 import { useDebounce } from "@/hooks/useDebounce";
 import { useToast } from "@/hooks/use-toast";
 import { errorMessage } from "@/components/settings/validation";
@@ -92,8 +92,7 @@ export default function Activities() {
 
   // Selection & bulk delete.
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [deleting, setDeleting] = useState(false);
-  const deleteActivity = useDeleteActivity();
+  const bulkDelete = useBulkDeleteActivities();
   const toggleSelect = (id: string) =>
     setSelected((prev) => {
       const next = new Set(prev);
@@ -102,20 +101,23 @@ export default function Activities() {
       return next;
     });
   const handleBulkDelete = async () => {
-    setDeleting(true);
     const ids = Array.from(selected);
-    const results = await Promise.allSettled(ids.map((id) => deleteActivity.mutateAsync(id)));
-    const failed = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
-    setDeleting(false);
-    setSelected(new Set(ids.filter((_, i) => results[i].status === "rejected")));
-    if (failed.length) {
-      toast({
-        title: `${ids.length - failed.length} deleted, ${failed.length} failed`,
-        description: errorMessage(failed[0].reason),
-        variant: "destructive",
-      });
-    } else {
-      toast({ title: `${ids.length} ${ids.length === 1 ? "activity" : "activities"} deleted`, variant: "success" });
+    try {
+      const { deleted, error } = await bulkDelete.mutateAsync(ids);
+      const done = new Set(deleted);
+      // Keep whatever wasn't deleted selected so it can be retried.
+      setSelected(new Set(ids.filter((id) => !done.has(id))));
+      if (deleted.length < ids.length) {
+        toast({
+          title: `${deleted.length} of ${ids.length} deleted`,
+          description: error ? errorMessage(error) : "The others may already have been deleted, or your role doesn't allow deleting them.",
+          variant: "destructive",
+        });
+      } else {
+        toast({ title: `${ids.length} ${ids.length === 1 ? "activity" : "activities"} deleted`, variant: "success" });
+      }
+    } catch (err) {
+      toast({ title: "Couldn't delete activities", description: errorMessage(err), variant: "destructive" });
     }
   };
 
@@ -246,7 +248,13 @@ export default function Activities() {
 
       {content}
 
-      <BulkActionBar count={selected.size} onDelete={handleBulkDelete} onClear={() => setSelected(new Set())} deleting={deleting} />
+      <BulkActionBar
+        count={selected.size}
+        onDelete={handleBulkDelete}
+        onClear={() => setSelected(new Set())}
+        deleting={bulkDelete.isPending}
+        noun={["activity", "activities"]}
+      />
       <LogActivityDialog open={logOpen} onOpenChange={setLogOpen} defaultDealId={dealId ?? undefined} defaultContactId={contactId ?? undefined} />
       <ActivityDetailDialog activity={openActivity} open={!!openId && !!openActivity} onOpenChange={(o) => !o && setOpenId(null)} />
     </div>

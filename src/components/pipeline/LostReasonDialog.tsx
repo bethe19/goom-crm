@@ -23,6 +23,12 @@ export function LostReasonDialog({ open, dealTitle, stageName = "Lost", pending,
     if (open) setReason("");
   }, [open]);
 
+  // Enter and the submit button both land here: never confirm twice (while saving or while closing).
+  const submit = () => {
+    if (pending || !open) return;
+    onConfirm(reason);
+  };
+
   return (
     <Dialog open={open} onOpenChange={(o) => !o && !pending && onCancel()}>
       <DialogContent className="sm:max-w-md">
@@ -34,7 +40,7 @@ export function LostReasonDialog({ open, dealTitle, stageName = "Lost", pending,
           className="space-y-3"
           onSubmit={(e) => {
             e.preventDefault();
-            onConfirm(reason);
+            submit();
           }}
         >
           <div className="flex flex-wrap gap-1.5" aria-label="Common reasons">
@@ -56,7 +62,7 @@ export function LostReasonDialog({ open, dealTitle, stageName = "Lost", pending,
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
-                  onConfirm(reason);
+                  submit();
                 }
               }}
               placeholder="Optional"

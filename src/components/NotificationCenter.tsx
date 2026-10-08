@@ -9,6 +9,7 @@ import {
   useMarkAllNotificationsRead,
   useMarkNotificationRead,
   useNotifications,
+  useUnreadNotificationCount,
   type Notification,
 } from "@/hooks/useNotifications";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -37,7 +38,9 @@ export function NotificationCenter() {
   const confirm = useConfirm();
   const navigate = useNavigate();
 
-  const unreadCount = notifications.filter((n) => !n.read).length;
+  // The list holds only the latest 50; the badge uses a server-side count of every unread one.
+  const { data: unreadTotal } = useUnreadNotificationCount();
+  const unreadCount = unreadTotal ?? notifications.filter((n) => !n.read).length;
   const badge = unreadCount > 9 ? "9+" : String(unreadCount);
 
   const onError = (err: unknown) => toast.error(sanitizeErrorMessage((err as Error)?.message));

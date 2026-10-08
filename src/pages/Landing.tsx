@@ -14,7 +14,7 @@ const STEPS = [
   },
   {
     title: "Bring in your data",
-    description: "Import contacts, companies and deals from a CSV, add them by hand, or load sample data to explore first.",
+    description: "Import contacts, companies and deals from a CSV, or add them by hand.",
   },
   {
     title: "Invite your team",

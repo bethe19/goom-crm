@@ -3,7 +3,7 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { toast } from "sonner";
-import { Clock, Loader2, MailCheck, Trash2, UserMinus, Users } from "lucide-react";
+import { Clock, Loader2, MailCheck, RefreshCw, Send, Trash2, UserMinus, Users } from "lucide-react";
 import { useAuth, type AppRole } from "@/contexts/AuthContext";
 import {
   useCreateInvitation,
@@ -13,6 +13,7 @@ import {
   useRevokeInvitation,
   useUpdateMemberRole,
   type CreatedInvitation,
+  type Invitation,
   type Member,
 } from "@/hooks/useTeam";
 import { useConfirm } from "@/components/common/ConfirmDialog";
@@ -34,11 +35,15 @@ import { ROLE_OPTIONS, emailSchema, errorMessage, initials, invitableRoles, invi
 export function TeamSettings() {
   const { can } = useAuth();
   const canInvite = can("team.invite");
+  // The most recent invitation, shown with its link under the invite form.
+  const [last, setLast] = useState<CreatedInvitation | null>(null);
+  // A resend replaces the token: keep the link under the form in sync if it's for the same person.
+  const onReinvited = (result: CreatedInvitation) => setLast((prev) => (prev && prev.email === result.email ? result : prev));
   return (
     <div className="space-y-6">
-      {canInvite && <InviteSection />}
+      {canInvite && <InviteSection last={last} onCreated={setLast} />}
       <MembersSection />
-      {canInvite && <PendingInvitesSection />}
+      {canInvite && <PendingInvitesSection onReinvited={onReinvited} />}
     </div>
   );
 }
@@ -47,19 +52,28 @@ export function TeamSettings() {
 
 const inviteSchema = z.object({ email: emailSchema, role: z.enum(["admin", "manager", "rep"]) });
 
-function InviteSection() {
+/** True when an invitation is past its expiry date. */
+function isExpired(inv: Invitation): boolean {
+  return !!inv.expires_at && new Date(inv.expires_at).getTime() < Date.now();
+}
+
+function InviteSection({ last, onCreated }: { last: CreatedInvitation | null; onCreated: (result: CreatedInvitation) => void }) {
   const { can } = useAuth();
   const { wouldExceed } = usePlan();
   const create = useCreateInvitation();
   const members = useMembers();
+  const invitations = useInvitations();
   const canInviteAnyRole = can("team.invite_any_role");
   const seatsFull = wouldExceed("seats");
-  const [last, setLast] = useState<CreatedInvitation | null>(null);
   const { register, handleSubmit, formState, setValue, watch, reset, setError } = useForm<z.infer<typeof inviteSchema>>({
     resolver: zodResolver(inviteSchema),
     defaultValues: { email: "", role: "rep" },
   });
   const role = watch("role");
+  const typedEmail = (watch("email") ?? "").trim().toLowerCase();
+  // Re-inviting someone with a live pending invitation replaces it without using another seat.
+  const isReinvite = !!typedEmail && !!invitations.data?.some((inv) => inv.email.toLowerCase() === typedEmail && !isExpired(inv));
+  const blockedBySeats = seatsFull && !isReinvite;
   // Mirrors create_invitation: admins invite any role, managers invite reps only.
   const roleOptions = invitableRoles(canInviteAnyRole);
 
@@ -71,7 +85,7 @@ function InviteSection() {
     }
     try {
       const result = await create.mutateAsync({ email, role: values.role });
-      setLast(result);
+      onCreated(result);
       reset({ email: "", role: values.role });
       toast.success(result.emailSent ? `Invitation emailed to ${email}` : `Invitation created for ${email}`);
     } catch (err) {
@@ -119,7 +133,7 @@ function InviteSection() {
             </Select>
           </div>
           <div className="sm:pt-6">
-            <Button type="submit" className="w-full sm:w-auto" disabled={formState.isSubmitting || seatsFull}>
+            <Button type="submit" className="w-full sm:w-auto" disabled={formState.isSubmitting || blockedBySeats}>
               {formState.isSubmitting ? (
                 <>
                   <Loader2 className="h-4 w-4 animate-spin" /> Inviting…
@@ -141,6 +155,11 @@ function InviteSection() {
               {last.emailSent ? (
                 <>
                   We emailed an invitation to <span className="font-medium">{last.email}</span>. You can also share this link:
+                </>
+              ) : last.emailError ? (
+                <>
+                  We couldn't email <span className="font-medium">{last.email}</span>: {last.emailError} Share this link with them
+                  instead:
                 </>
               ) : (
                 <>
@@ -198,7 +217,8 @@ function MembersSection() {
     const name = member.full_name || member.email || "this member";
     const ok = await confirm({
       title: `Remove ${name}?`,
-      description: "They'll lose access to this workspace immediately. Their deals, contacts and activities stay in the workspace.",
+      description:
+        "They'll lose access to this workspace immediately. Their deals and open tasks will be reassigned to you; contacts and activities stay in the workspace.",
       confirmLabel: "Remove member",
     });
     if (!ok) return;
@@ -305,10 +325,36 @@ function MembersSection() {
 
 // ---- Pending invitations -----------------------------------------------------------------------
 
-function PendingInvitesSection() {
+function PendingInvitesSection({ onReinvited }: { onReinvited: (result: CreatedInvitation) => void }) {
+  const { can } = useAuth();
   const invitations = useInvitations();
   const revoke = useRevokeInvitation();
+  const create = useCreateInvitation();
   const confirm = useConfirm();
+  const [resendingId, setResendingId] = useState<string | null>(null);
+  const roleOptions = invitableRoles(can("team.invite_any_role"));
+
+  // create_invitation replaces the person's pending invitation with a fresh 7-day one (new token)
+  // and doesn't use another seat for a live invitation; the new one is then emailed.
+  const resendInvite = async (inv: Invitation) => {
+    setResendingId(inv.id);
+    try {
+      const result = await create.mutateAsync({ email: inv.email, role: inv.role });
+      onReinvited(result);
+      if (result.emailSent) {
+        toast.success(`Invitation ${isExpired(inv) ? "renewed and emailed" : "re-sent"} to ${result.email}`);
+      } else {
+        const why = result.emailError ? `No email was sent: ${result.emailError}` : "Email delivery isn't set up, so no email was sent.";
+        toast.success(`New invite link created for ${result.email}`, {
+          description: `${why} The previous link no longer works — copy the new one.`,
+        });
+      }
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      setResendingId(null);
+    }
+  };
 
   const revokeInvite = async (id: string, email: string) => {
     const ok = await confirm({
@@ -336,7 +382,9 @@ function PendingInvitesSection() {
       ) : (
         <ul className="divide-y divide-border rounded-lg border border-border">
           {invitations.data.map((inv) => {
-            const expired = !!inv.expires_at && new Date(inv.expires_at).getTime() < Date.now();
+            const expired = isExpired(inv);
+            const canResend = roleOptions.some((r) => r.value === inv.role);
+            const resending = resendingId === inv.id;
             return (
               <li key={inv.id} className="flex flex-col gap-2 p-3 sm:flex-row sm:items-center">
                 <div className="min-w-0 flex-1">
@@ -357,6 +405,32 @@ function PendingInvitesSection() {
                   </p>
                 </div>
                 <div className="flex items-center gap-1">
+                  {canResend && (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 gap-1.5 px-2 text-muted-foreground hover:text-foreground"
+                          aria-label={`${expired ? "Renew" : "Resend"} invitation for ${inv.email}`}
+                          disabled={resendingId !== null}
+                          onClick={() => resendInvite(inv)}
+                        >
+                          {resending ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : expired ? (
+                            <RefreshCw className="h-4 w-4" />
+                          ) : (
+                            <Send className="h-4 w-4" />
+                          )}
+                          {expired ? "Renew" : "Resend"}
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        {expired ? "Create a fresh invitation and email it" : "Email a fresh invite link (the current one stops working)"}
+                      </TooltipContent>
+                    </Tooltip>
+                  )}
                   {!expired && <CopyButton value={inviteLink(inv.token)} iconOnly label={`Copy invite link for ${inv.email}`} />}
                   <Tooltip>
                     <TooltipTrigger asChild>

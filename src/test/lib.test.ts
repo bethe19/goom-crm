@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { parseCsv, parseCsvObjects, toCsv } from "@/lib/csv";
+import { fetchAllRows } from "@/lib/fetchAll";
 import { ilikeAny } from "@/lib/postgrest";
 import { sanitizeHref, renderMarkdown } from "@/lib/sanitize";
 
@@ -22,6 +23,43 @@ describe("parseCsv", () => {
   it("round-trips through toCsv and neutralizes formulas", () => {
     const csv = toCsv(["a", "b"], [["x,y", '=SUM(A1)'], [null, ["t1", "t2"]]]);
     expect(parseCsv(csv)).toEqual([["a", "b"], ["x,y", "'=SUM(A1)"], ["", "t1; t2"]]);
+  });
+
+  it("uses an explicit delimiter and reports unclosed quotes", () => {
+    expect(parseCsv("a|b\n1|2", "|")).toEqual([["a", "b"], ["1", "2"]]);
+    expect(() => parseCsv('a,b\n1,2\n3,"x\n')).toThrow(/Line 3.*never closed/);
+  });
+});
+
+describe("fetchAllRows", () => {
+  const source = Array.from({ length: 7 }, (_, i) => i);
+
+  it("keeps paging when the server caps pages below pageSize", async () => {
+    const calls: number[] = [];
+    // Server max_rows of 2 while we ask for 5 per page.
+    const rows = await fetchAllRows<number>(async (from, to) => {
+      calls.push(from);
+      return { data: source.slice(from, Math.min(to + 1, from + 2)), error: null };
+    }, { pageSize: 5 });
+    expect(rows).toEqual(source);
+    expect(calls).toEqual([0, 2, 4, 6, 7]);
+  });
+
+  it("stops at the known total and honours an abort signal", async () => {
+    const calls: number[] = [];
+    const rows = await fetchAllRows<number>(async (from, to) => {
+      calls.push(from);
+      return { data: source.slice(from, to + 1), error: null, count: from === 0 ? source.length : null };
+    }, { pageSize: 4 });
+    expect(rows).toEqual(source);
+    expect(calls).toEqual([0, 4]);
+
+    const build = async (from: number) => ({ data: source.slice(from), error: null });
+    await expect(fetchAllRows<number>(build, { signal: new AbortController().signal })).resolves.toEqual(source);
+    const controller = new AbortController();
+    controller.abort();
+    await expect(fetchAllRows<number>(build, { signal: controller.signal })).rejects.toMatchObject({ name: "AbortError" });
+    await expect(fetchAllRows<number>(build, undefined, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
   });
 });
 
@@ -50,6 +88,10 @@ describe("sanitizeHref", () => {
     expect(sanitizeHref("mailto:a@b.co")).toBe("mailto:a@b.co");
     expect(sanitizeHref("/pipeline")).toBe("/pipeline");
     expect(sanitizeHref("example.com")).toBe("https://example.com");
+  });
+  it.each(["/\\evil.com", "/\\/evil.com", "//evil.com", "/ /evil.com", "/pipeline\\..\\x"])("blocks off-site rooted path %s", (href) => {
+    // Browsers treat "\" as "/", so these would be protocol-relative links to another host.
+    expect(sanitizeHref(href)).toBe("#");
   });
 });
 

@@ -2,12 +2,22 @@
  * Pure helpers and row types for the platform owner console (`/platform`).
  * Row shapes mirror the `platform_*` RPCs exactly (see the round-2 brief).
  */
-import type { PlanId } from "@/lib/plans";
+import { addDays, addMonths, differenceInCalendarDays } from "date-fns";
+import { isPlanId, type PlanId } from "@/lib/plans";
+import { formatDate } from "@/lib/formatters";
 
 export interface PlatformOverview {
   total_workspaces: number;
   active_workspaces_30d: number;
   suspended_workspaces: number;
+  /** paid_until in the future */
+  paying_workspaces: number;
+  /** on a free trial and not paid */
+  trialing_workspaces: number;
+  /** trial and paid period both over: data locked behind the paywall */
+  expired_workspaces: number;
+  /** workspaces with a pending requested_plan (awaiting payment details / activation) */
+  plan_requests: number;
   total_users: number;
   signups_7d: number;
   signups_30d: number;
@@ -28,6 +38,9 @@ export interface PlatformTimeseriesPoint {
 
 export type WorkspaceStatus = "active" | "suspended";
 
+/** Same values as `_billing_state()` in the database. */
+export type WorkspaceBillingState = "trialing" | "active" | "expired";
+
 export interface PlatformWorkspaceRow {
   id: string;
   name: string;
@@ -40,6 +53,12 @@ export interface PlatformWorkspaceRow {
   contact_count: number;
   ai_requests_30d: number;
   last_activity_at: string | null;
+  trial_ends_at: string | null;
+  paid_until: string | null;
+  billing_state: WorkspaceBillingState;
+  /** Plan an admin asked for (awaiting payment), or null. */
+  requested_plan: PlanId | null;
+  plan_requested_at: string | null;
   total_count: number;
 }
 
@@ -96,6 +115,10 @@ export function normalizeOverview(raw: unknown): PlatformOverview {
     total_workspaces: toNumber(o.total_workspaces),
     active_workspaces_30d: toNumber(o.active_workspaces_30d),
     suspended_workspaces: toNumber(o.suspended_workspaces),
+    paying_workspaces: toNumber(o.paying_workspaces),
+    trialing_workspaces: toNumber(o.trialing_workspaces),
+    expired_workspaces: toNumber(o.expired_workspaces),
+    plan_requests: toNumber(o.plan_requests),
     total_users: toNumber(o.total_users),
     signups_7d: toNumber(o.signups_7d),
     signups_30d: toNumber(o.signups_30d),
@@ -181,4 +204,100 @@ export function splitWorkspaces(value: string | null | undefined): string[] {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+/* --------------------------------------------------------------------- billing */
+
+const toTime = (iso: string | null | undefined): number | null => {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? null : t;
+};
+
+/**
+ * The workspace's billing state: the RPC's `billing_state` when it's valid, otherwise derived from
+ * the dates with the database rule (paid beats trial; neither in the future = expired).
+ */
+export function workspaceBillingState(
+  raw: unknown,
+  trialEndsAt: string | null,
+  paidUntil: string | null,
+  now: Date = new Date(),
+): WorkspaceBillingState {
+  if (raw === "trialing" || raw === "active" || raw === "expired") return raw;
+  const paid = toTime(paidUntil);
+  if (paid !== null && paid > now.getTime()) return "active";
+  const trial = toTime(trialEndsAt);
+  if (trial !== null && trial > now.getTime()) return "trialing";
+  return "expired";
+}
+
+export function toPlanIdOrNull(value: unknown): PlanId | null {
+  return isPlanId(value) ? value : null;
+}
+
+export interface BillingBadgeInfo {
+  state: WorkspaceBillingState;
+  /** "Trial · 5 days left", "Paid until Nov 7, 2026", "Expired" */
+  label: string;
+  /** Longer explanation for a tooltip / title. */
+  detail: string;
+  /** Trial ending within 3 days, or expired. */
+  attention: boolean;
+}
+
+/** Badge text for the workspaces table. */
+export function workspaceBillingBadge(
+  row: Pick<PlatformWorkspaceRow, "billing_state" | "trial_ends_at" | "paid_until">,
+  now: Date = new Date(),
+): BillingBadgeInfo {
+  if (row.billing_state === "trialing") {
+    const t = toTime(row.trial_ends_at);
+    const days = t === null ? null : Math.max(0, differenceInCalendarDays(new Date(t), now));
+    const left = days === null ? "" : days === 0 ? " · last day" : ` · ${days} ${days === 1 ? "day" : "days"} left`;
+    return {
+      state: "trialing",
+      label: `Trial${left}`,
+      detail: row.trial_ends_at ? `Free trial ends ${formatDate(row.trial_ends_at)}` : "On a free trial",
+      attention: days !== null && days <= 3,
+    };
+  }
+  if (row.billing_state === "active") {
+    return {
+      state: "active",
+      label: row.paid_until ? `Paid until ${formatDate(row.paid_until)}` : "Paid",
+      detail: row.paid_until ? `Paid period ends ${formatDate(row.paid_until)}` : "Paid",
+      attention: false,
+    };
+  }
+  const ended = row.paid_until
+    ? `Subscription ended ${formatDate(row.paid_until)}`
+    : row.trial_ends_at
+      ? `Trial ended ${formatDate(row.trial_ends_at)}`
+      : "No active trial or paid period";
+  return { state: "expired", label: "Expired", detail: `${ended} — data locked until activated`, attention: true };
+}
+
+/** Choices offered by the activation dialog (the RPC accepts 1–36). */
+export const ACTIVATION_MONTHS = [1, 3, 6, 12, 24] as const;
+/** Choices offered by the extend-trial dialog (the RPC accepts 1–90). */
+export const TRIAL_EXTENSION_DAYS = [7, 14, 30] as const;
+
+/** Preview of `platform_activate_workspace`: paid_until = max(paid_until, now) + months. */
+export function activationEndsAt(paidUntil: string | null, months: number, now: Date = new Date()): Date {
+  const paid = toTime(paidUntil);
+  const from = paid !== null && paid > now.getTime() ? new Date(paid) : now;
+  return addMonths(from, months);
+}
+
+/** Preview of `platform_extend_trial`: trial_ends_at = max(trial_ends_at, now) + days. */
+export function trialExtendedTo(trialEndsAt: string | null, days: number, now: Date = new Date()): Date {
+  const trial = toTime(trialEndsAt);
+  const from = trial !== null && trial > now.getTime() ? new Date(trial) : now;
+  return addDays(from, days);
+}
+
+/** Plan preselected when activating: the requested plan, else the current one (else Growth). */
+export function defaultActivationPlan(row: Pick<PlatformWorkspaceRow, "requested_plan" | "plan">): PlanId {
+  return row.requested_plan ?? (isPlanId(row.plan) ? row.plan : "growth");
 }

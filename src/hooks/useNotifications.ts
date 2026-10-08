@@ -18,6 +18,8 @@ export interface Notification {
 const NOTIFICATION_LIMIT = 50;
 
 export const notificationsKey = (userId: string | undefined) => ["notifications", userId] as const;
+/** Nested under `notificationsKey`, so invalidating the list refreshes the count too. */
+export const unreadNotificationsCountKey = (userId: string | undefined) => ["notifications", userId, "unread-count"] as const;
 
 /** Where a notification's record lives in the app (`?open=<id>` opens its detail sheet). */
 const ROUTES_BY_REFERENCE: Record<string, string> = {
@@ -80,75 +82,124 @@ export function useNotifications() {
   return query;
 }
 
+/**
+ * Total unread notifications for the signed-in user (a head count, so it isn't capped by the
+ * latest-50 list). Kept live by `useNotifications`' realtime subscription, which invalidates it.
+ */
+export function useUnreadNotificationCount() {
+  const { user } = useAuth();
+  const userId = user?.id;
+  return useQuery({
+    queryKey: unreadNotificationsCountKey(userId),
+    queryFn: async () => {
+      const { count, error } = await supabase
+        .from("notifications")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", userId!)
+        .eq("read", false);
+      if (error) throw error;
+      return count ?? 0;
+    },
+    enabled: !!userId,
+    staleTime: 60_000,
+  });
+}
+
+type NotificationKeys = {
+  key: ReturnType<typeof notificationsKey>;
+  countKey: ReturnType<typeof unreadNotificationsCountKey>;
+};
+
+type OptimisticContext = { previous?: Notification[]; previousCount?: number };
+
 function useOptimisticNotifications() {
   const { user } = useAuth();
   const queryClient = useQueryClient();
-  const key = notificationsKey(user?.id);
-  return { user, queryClient, key };
+  const keys: NotificationKeys = { key: notificationsKey(user?.id), countKey: unreadNotificationsCountKey(user?.id) };
+  return { user, queryClient, keys };
 }
 
+const unreadIn = (list: Notification[] | undefined) => list?.filter((n) => !n.read).length ?? 0;
+
+/**
+ * Applies `update` to the cached list and lowers the unread count by the unread rows it changed,
+ * or sets the count to `nextCount` ("mark all read" / "clear" also cover rows past the list).
+ */
 async function applyOptimistic(
   queryClient: QueryClient,
-  key: ReturnType<typeof notificationsKey>,
+  keys: NotificationKeys,
   update: (list: Notification[]) => Notification[],
-) {
-  await queryClient.cancelQueries({ queryKey: key });
-  const previous = queryClient.getQueryData<Notification[]>(key);
-  if (previous) queryClient.setQueryData<Notification[]>(key, update(previous));
-  return { previous };
+  nextCount?: number,
+): Promise<OptimisticContext> {
+  // Prefix match: also cancels an in-flight unread count.
+  await queryClient.cancelQueries({ queryKey: keys.key });
+  const previous = queryClient.getQueryData<Notification[]>(keys.key);
+  const previousCount = queryClient.getQueryData<number>(keys.countKey);
+  const next = previous ? update(previous) : undefined;
+  if (next) queryClient.setQueryData<Notification[]>(keys.key, next);
+  if (typeof previousCount === "number") {
+    const count = nextCount ?? Math.max(0, previousCount - (unreadIn(previous) - unreadIn(next)));
+    queryClient.setQueryData<number>(keys.countKey, count);
+  }
+  return { previous, previousCount };
+}
+
+function rollback(queryClient: QueryClient, keys: NotificationKeys, ctx: OptimisticContext | undefined) {
+  if (ctx?.previous) queryClient.setQueryData(keys.key, ctx.previous);
+  if (typeof ctx?.previousCount === "number") queryClient.setQueryData(keys.countKey, ctx.previousCount);
 }
 
 export function useMarkNotificationRead() {
-  const { queryClient, key } = useOptimisticNotifications();
+  const { queryClient, keys } = useOptimisticNotifications();
   return useMutation({
     mutationFn: async (id: string) => {
       const { error } = await supabase.from("notifications").update({ read: true }).eq("id", id);
       if (error) throw error;
     },
-    onMutate: (id) => applyOptimistic(queryClient, key, (list) => list.map((n) => (n.id === id ? { ...n, read: true } : n))),
-    onError: (_e, _id, ctx) => ctx?.previous && queryClient.setQueryData(key, ctx.previous),
-    onSettled: () => queryClient.invalidateQueries({ queryKey: key }),
+    onMutate: (id) => applyOptimistic(queryClient, keys, (list) => list.map((n) => (n.id === id ? { ...n, read: true } : n))),
+    onError: (_e, _id, ctx) => rollback(queryClient, keys, ctx),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: keys.key }),
   });
 }
 
 export function useMarkAllNotificationsRead() {
-  const { user, queryClient, key } = useOptimisticNotifications();
+  const { user, queryClient, keys } = useOptimisticNotifications();
   return useMutation({
     mutationFn: async () => {
       if (!user) return;
       const { error } = await supabase.from("notifications").update({ read: true }).eq("user_id", user.id).eq("read", false);
       if (error) throw error;
     },
-    onMutate: () => applyOptimistic(queryClient, key, (list) => list.map((n) => ({ ...n, read: true }))),
-    onError: (_e, _v, ctx) => ctx?.previous && queryClient.setQueryData(key, ctx.previous),
-    onSettled: () => queryClient.invalidateQueries({ queryKey: key }),
+    onMutate: () => applyOptimistic(queryClient, keys, (list) => list.map((n) => ({ ...n, read: true })), 0),
+    onError: (_e, _v, ctx) => rollback(queryClient, keys, ctx),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: keys.key }),
   });
 }
 
 export function useDeleteNotification() {
-  const { queryClient, key } = useOptimisticNotifications();
+  const { queryClient, keys } = useOptimisticNotifications();
   return useMutation({
     mutationFn: async (id: string) => {
       const { error } = await supabase.from("notifications").delete().eq("id", id);
       if (error) throw error;
     },
-    onMutate: (id) => applyOptimistic(queryClient, key, (list) => list.filter((n) => n.id !== id)),
-    onError: (_e, _id, ctx) => ctx?.previous && queryClient.setQueryData(key, ctx.previous),
-    onSettled: () => queryClient.invalidateQueries({ queryKey: key }),
+    onMutate: (id) => applyOptimistic(queryClient, keys, (list) => list.filter((n) => n.id !== id)),
+    onError: (_e, _id, ctx) => rollback(queryClient, keys, ctx),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: keys.key }),
   });
 }
 
 /** Deletes all of the user's notifications. */
 export function useClearNotifications() {
-  const { user, queryClient, key } = useOptimisticNotifications();
+  const { user, queryClient, keys } = useOptimisticNotifications();
   return useMutation({
     mutationFn: async () => {
       if (!user) return;
       const { error } = await supabase.from("notifications").delete().eq("user_id", user.id);
       if (error) throw error;
     },
-    onMutate: () => applyOptimistic(queryClient, key, () => []),
-    onError: (_e, _v, ctx) => ctx?.previous && queryClient.setQueryData(key, ctx.previous),
-    onSettled: () => queryClient.invalidateQueries({ queryKey: key }),
+    onMutate: () => applyOptimistic(queryClient, keys, () => [], 0),
+    onError: (_e, _v, ctx) => rollback(queryClient, keys, ctx),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: keys.key }),
   });
 }

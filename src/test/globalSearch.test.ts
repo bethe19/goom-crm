@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hitHref, matchesCommand, parseSearchResults, pushRecent } from "@/hooks/useGlobalSearch";
+import { hitHref, matchesCommand, parseSearchResults, pushRecent, recentRecordsKey } from "@/hooks/useGlobalSearch";
 import { notificationHref } from "@/hooks/useNotifications";
 
 describe("parseSearchResults", () => {
@@ -40,6 +40,13 @@ describe("palette helpers", () => {
     expect(list).toHaveLength(6);
     expect(list[0].id).toBe("5");
     expect(list.filter((h) => h.id === "5")).toHaveLength(1);
+  });
+
+  it("keys recents per user and workspace", () => {
+    expect(recentRecordsKey("u1", "org1")).toBe("goom:recent-records:u1:org1");
+    expect(recentRecordsKey("u1", "org2")).not.toBe(recentRecordsKey("u1", "org1"));
+    expect(recentRecordsKey("u1", undefined)).toBeNull();
+    expect(recentRecordsKey(undefined, "org1")).toBeNull();
   });
 
   it("matches commands by label or keyword", () => {

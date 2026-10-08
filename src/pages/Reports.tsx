@@ -16,9 +16,10 @@ import { WinLossCard } from "@/components/dashboard/WinLossCard";
 import { ActivityHeatmap } from "@/components/dashboard/ActivityHeatmap";
 import { Leaderboard } from "@/components/dashboard/Leaderboard";
 import { ActivityMixChart, BarList, HistogramCard, LockedPreview, WinRateTrendChart } from "@/components/dashboard/ReportCharts";
-import { SectionCard, Segmented } from "@/components/dashboard/ChartParts";
+import { AnalyticsErrorState, SectionCard, Segmented } from "@/components/dashboard/ChartParts";
 import { LOST_COLOR, VIZ_VARS, stageColor } from "@/components/dashboard/chartTheme";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useNow } from "@/hooks/useNow";
 import { downloadCsv } from "@/lib/csv";
 import { formatCompactCurrency, formatCurrency, formatPercent } from "@/lib/formatters";
 import { minimumPlanFor } from "@/lib/plans";
@@ -104,7 +105,7 @@ export default function Reports() {
   const [pipelineId, setPipelineId] = useState<string | undefined>();
   const [sizeView, setSizeView] = useState<SizeView>("won");
 
-  const now = useMemo(() => new Date(), []);
+  const now = useNow();
   const range = useMemo(() => getPeriodRange(period, now), [period, now]);
   const prevRange = useMemo(() => getPreviousPeriodRange(period, now), [period, now]);
   const unit = pickBucketUnit(range);
@@ -268,7 +269,7 @@ export default function Reports() {
       </div>
 
       {error ? (
-        <ErrorState error={error} onRetry={retry} title="Couldn't load reports" />
+        <AnalyticsErrorState error={error} onRetry={retry} title="Couldn't load reports" />
       ) : (
         <>
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">

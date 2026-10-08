@@ -4,7 +4,7 @@ import type { Deal } from "@/hooks/useDeals";
 import type { PipelineStage } from "@/hooks/usePipelineStages";
 import { formatCurrency, formatFriendlyDate } from "@/lib/formatters";
 import { cn } from "@/lib/utils";
-import { isDealOverdue, sortDeals, summarizeDeals, type DealSortKey, type SortDir } from "./dealUtils";
+import { isDealOverdue, openDeals, sortDeals, summarizeDeals, type DealSortKey, type SortDir } from "./dealUtils";
 import { MemberAvatar } from "./MemberAvatar";
 import { memberName, type WorkspaceMember } from "./useWorkspaceMembers";
 
@@ -41,7 +41,8 @@ export function DealsTable({ deals, stages, currency, membersById, onOpen }: Dea
       }),
     [deals, sort, stageById, membersById],
   );
-  const summary = summarizeDeals(deals);
+  // Totals cover open deals only: won/lost value isn't pipeline (and won would count at 100% weighted).
+  const openSummary = useMemo(() => summarizeDeals(openDeals(deals, stages)), [deals, stages]);
 
   const toggleSort = (key: DealSortKey) =>
     setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: key === "value" || key === "probability" ? "desc" : "asc" }));
@@ -131,10 +132,10 @@ export function DealsTable({ deals, stages, currency, membersById, onOpen }: Dea
       </div>
       <div className="flex flex-wrap items-center justify-between gap-2 border-t px-3 py-2 text-xs text-muted-foreground">
         <span>
-          {summary.count} {summary.count === 1 ? "deal" : "deals"}
+          {deals.length} {deals.length === 1 ? "deal" : "deals"}
         </span>
         <span className="tabular-nums">
-          Total {formatCurrency(summary.total, currency)} · Weighted {formatCurrency(summary.weighted, currency)}
+          {formatCurrency(openSummary.total, currency)} open · {formatCurrency(openSummary.weighted, currency)} weighted
         </span>
       </div>
     </div>

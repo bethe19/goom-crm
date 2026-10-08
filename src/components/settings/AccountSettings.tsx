@@ -7,7 +7,10 @@ import { toast } from "sonner";
 import { Loader2, LogOut, MailCheck } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
+import { removeAvatarFiles } from "@/hooks/useMyProfile";
 import { useConfirm } from "@/components/common/ConfirmDialog";
+import { Captcha } from "@/components/common/Captcha";
+import { CAPTCHA_MISSING_MESSAGE, useCaptcha } from "@/hooks/useCaptcha";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -119,9 +122,27 @@ function isReauthError(err: { message?: string; code?: string } | null | undefin
   return text.includes("reauthentication") || text.includes("nonce");
 }
 
+/** True when the user can sign in with email + password (vs. Google only). */
+function hasPasswordIdentity(user: { identities?: { provider: string }[] } | null | undefined): boolean {
+  return !!user?.identities?.some((i) => i.provider === "email");
+}
+
+/**
+ * Re-authenticates with the current password before a sensitive change. Returns null when the
+ * password is correct, otherwise the message to show under the password field.
+ */
+async function verifyCurrentPassword(email: string, password: string, captchaToken: string | undefined): Promise<string | null> {
+  const { error } = await supabase.auth.signInWithPassword({ email, password, options: { captchaToken } });
+  if (!error) return null;
+  const text = `${error.code ?? ""} ${error.message ?? ""}`.toLowerCase();
+  return text.includes("invalid_credentials") || text.includes("invalid login credentials")
+    ? "That password isn't correct"
+    : errorMessage(error);
+}
+
 function PasswordSection() {
   const { user } = useAuth();
-  const hasPassword = !!user?.identities?.some((i) => i.provider === "email");
+  const hasPassword = hasPasswordIdentity(user);
   const [nonceStep, setNonceStep] = useState(false);
   const [nonce, setNonce] = useState("");
   const [nonceError, setNonceError] = useState<string | null>(null);
@@ -141,6 +162,7 @@ function PasswordSection() {
     defaultValues: { current: "", password: "", confirm: "" },
   });
   const password = watch("password");
+  const captcha = useCaptcha();
 
   const done = () => {
     toast.success(hasPassword ? "Password changed" : "Password set — you can now sign in with email and password");
@@ -151,10 +173,15 @@ function PasswordSection() {
 
   const onSubmit = handleSubmit(async (values) => {
     if (hasPassword && user?.email) {
+      if (captcha.missing) {
+        toast.error(CAPTCHA_MISSING_MESSAGE);
+        return;
+      }
       // Re-authenticate: proves the current password and refreshes the session before a sensitive change.
-      const { error } = await supabase.auth.signInWithPassword({ email: user.email, password: values.current ?? "" });
-      if (error) {
-        setError("current", { message: "That password isn't correct" });
+      const passwordError = await verifyCurrentPassword(user.email, values.current ?? "", captcha.token);
+      captcha.reset();
+      if (passwordError) {
+        setError("current", { message: passwordError });
         return;
       }
     }
@@ -285,6 +312,7 @@ function PasswordSection() {
             />
             <FieldError message={formState.errors.confirm?.message} />
           </div>
+          {hasPassword && <Captcha {...captcha.widgetProps} action="reauth" />}
         </div>
       </SettingsSection>
     </form>
@@ -330,27 +358,54 @@ function SessionsSection() {
 const DELETE_PHRASE = "DELETE";
 
 function DeleteAccountSection() {
-  const { signOut, organization, isAdmin } = useAuth();
+  const { user, signOut, organization, isAdmin } = useAuth();
   const navigate = useNavigate();
+  // Email/password accounts confirm with their password; Google-only accounts with the typed phrase alone.
+  const needsPassword = hasPasswordIdentity(user) && !!user?.email;
   const [open, setOpen] = useState(false);
   const [typed, setTyped] = useState("");
+  const [password, setPassword] = useState("");
+  const [passwordError, setPasswordError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const captcha = useCaptcha();
 
   const close = (next: boolean) => {
     if (deleting) return;
     setOpen(next);
     if (!next) {
       setTyped("");
+      setPassword("");
+      setPasswordError(null);
       setError(null);
     }
   };
 
   const deleteAccount = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (typed.trim() !== DELETE_PHRASE) return;
+    if (typed.trim() !== DELETE_PHRASE || !user) return;
+    if (needsPassword && !password) {
+      setPasswordError("Enter your current password");
+      return;
+    }
+    if (needsPassword && captcha.missing) {
+      setError(CAPTCHA_MISSING_MESSAGE);
+      return;
+    }
     setDeleting(true);
     setError(null);
+    setPasswordError(null);
+    if (needsPassword && user.email) {
+      const wrongPassword = await verifyCurrentPassword(user.email, password, captcha.token);
+      captcha.reset();
+      if (wrongPassword) {
+        setDeleting(false);
+        setPasswordError(wrongPassword);
+        return;
+      }
+    }
+    // Best-effort: delete the profile photo from storage while we're still signed in.
+    await removeAvatarFiles(user.id).catch(() => undefined);
     const { error: rpcError } = await supabase.rpc("delete_my_account");
     if (rpcError) {
       setDeleting(false);
@@ -389,24 +444,46 @@ function DeleteAccountSection() {
                 This can't be undone. You'll be signed out and won't be able to sign in with this account again.
               </DialogDescription>
             </DialogHeader>
+            {needsPassword && (
+              <div className="space-y-1.5">
+                <Label htmlFor="delete-password">Current password</Label>
+                <PasswordInput
+                  id="delete-password"
+                  autoFocus
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(e) => {
+                    setPassword(e.target.value);
+                    setPasswordError(null);
+                  }}
+                  aria-invalid={!!passwordError}
+                />
+                <FieldError message={passwordError ?? undefined} />
+              </div>
+            )}
             <div className="space-y-1.5">
               <Label htmlFor="delete-confirm">
                 Type <span className="font-mono font-semibold">{DELETE_PHRASE}</span> to confirm
               </Label>
               <Input
                 id="delete-confirm"
-                autoFocus
+                autoFocus={!needsPassword}
                 autoComplete="off"
                 value={typed}
                 onChange={(e) => setTyped(e.target.value)}
               />
               <FieldError message={error ?? undefined} />
             </div>
+            {needsPassword && <Captcha {...captcha.widgetProps} action="delete_account" />}
             <DialogFooter className="gap-2 sm:gap-0">
               <Button type="button" variant="outline" onClick={() => close(false)} disabled={deleting}>
                 Cancel
               </Button>
-              <Button type="submit" variant="destructive" disabled={deleting || typed.trim() !== DELETE_PHRASE}>
+              <Button
+                type="submit"
+                variant="destructive"
+                disabled={deleting || typed.trim() !== DELETE_PHRASE || (needsPassword && !password)}
+              >
                 {deleting ? (
                   <>
                     <Loader2 className="h-4 w-4 animate-spin" /> Deleting…

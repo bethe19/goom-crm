@@ -1,8 +1,8 @@
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useState, type ReactNode } from "react";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { AuthProvider } from "@/contexts/AuthContext";
 import { ThemeProvider } from "next-themes";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
@@ -51,6 +51,12 @@ export function PageFallback() {
   );
 }
 
+/** Resets on navigation, so the back button or a link recovers from a crashed page. */
+function RoutedBoundary({ children }: { children: ReactNode }) {
+  const { pathname } = useLocation();
+  return <ErrorBoundary resetKey={pathname}>{children}</ErrorBoundary>;
+}
+
 const App = () => {
   const [queryClient] = useState(
     () =>
@@ -70,6 +76,7 @@ const App = () => {
             <AuthProvider>
               <ConfirmProvider>
                 <BrowserRouter>
+                  <RoutedBoundary>
                   <Suspense fallback={<PageFallback />}>
                     <Routes>
                       {/* Public pages */}
@@ -107,6 +114,7 @@ const App = () => {
                       <Route path="*" element={<NotFound />} />
                     </Routes>
                   </Suspense>
+                  </RoutedBoundary>
                 </BrowserRouter>
               </ConfirmProvider>
             </AuthProvider>

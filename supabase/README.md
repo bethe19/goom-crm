@@ -1,11 +1,19 @@
 # Supabase backend
 
-> **Security action required: revoke the old Groq key.**
-> An earlier version of this repository shipped a Groq API key in client code (`src/lib/groq.ts`).
-> Anything that was ever committed or bundled into the browser must be treated as public.
-> **Revoke that key in the Groq console (https://console.groq.com/keys) now**, create a new one, and
-> store it only as an Edge Function secret (see below). Also rotate/delete any account created by
-> the removed `seed_goom_construction.sql` script, which set a well-known password.
+> **Security action required: rotate credentials that are in the git history.**
+> This repository's history (pushed to GitHub) contains secrets. Deleting files doesn't remove them
+> from history, so treat every one as public and rotate it:
+>
+> - **Supabase `service_role` key** — committed in `scripts/find_user.mjs` (commit `b0d4426`, removed
+>   in the next commit). It bypasses Row Level Security. In the dashboard (Project Settings -> API
+>   Keys) switch to the new API keys and **disable the legacy JWT-based keys**, or rotate the JWT
+>   secret. Then update the publishable key in your hosting env vars.
+> - **Groq API key** — committed in client code (commits `7850d85`, `5bfd500`). **Revoke it at
+>   https://console.groq.com/keys**, create a new one and store it only as an Edge Function secret
+>   (see below).
+>
+> The account created by the removed `seed_goom_construction.sql` script (well-known password) is
+> deleted by migration `20261007000001`.
 
 This folder holds the database schema (migrations), the local-dev seed, the edge functions and the
 local stack config.
@@ -63,9 +71,28 @@ includes 1,000 contacts. Upgrade to add more."*):
 - audit history: `deal_audit_log` is readable only on Enterprise (RLS).
 
 Forecast, advanced reports, CSV import/export and backups are gated in the UI only.
-New workspaces start on Starter. RPCs: `get_workspace_usage()` (any member) and
-`set_workspace_plan(p_plan)` (admins; a downgrade is refused while usage exceeds the target plan,
-naming the limit). There is no payment integration yet: admins switch plans themselves.
+RPCs: `get_workspace_usage()` (any member) and `set_workspace_plan(p_plan)` (admins; a downgrade is
+refused while usage exceeds the target plan, naming the limit).
+
+## Billing: trial and paid periods
+
+Every workspace gets a **14-day free trial** (`organizations.trial_ends_at`, default `NOW() + 14
+days`); new workspaces trial the **Growth** plan. After that it needs a paid period
+(`paid_until`). `_billing_state()` is `trialing`, `active` (paid) or `expired`.
+
+- **Expired workspaces are locked server-side**: `current_org_id()` never returns them, so RLS hides
+  all their data. `get_my_context()` still returns the workspace with `billing_state = 'expired'`
+  (it never creates a new workspace, and so a fresh trial, instead) and the app shows a paywall.
+  Nothing is deleted.
+- During the trial admins may switch plans freely; trials get at most **100 AI requests a month**
+  (`ai-chat` answers 429 with a trial message). Once paid, admins can only downgrade.
+- Admins call `request_plan(p_plan)` (also from the paywall) to ask for a plan. Pending requests are
+  listed first in the Platform console.
+- **There is no payment gateway.** Payment is collected offline (invoice / bank transfer); the
+  platform owner then calls `platform_activate_workspace(org, plan, months)`.
+  `platform_extend_trial(org, days)` and `platform_end_subscription(org)` cover the other cases.
+- A payment provider webhook (e.g. Chapa or Stripe) can later call
+  `billing_activate_workspace(org, plan, paid_until)`, which only the service role may execute.
 
 ## Roles (RBAC)
 
@@ -89,7 +116,8 @@ deals, and `get_dashboard_analytics` / `global_search` apply the same filters.
 Platform admins see platform-wide counts and metadata through the `platform_*` RPCs
 (`platform_overview`, `platform_timeseries`, `platform_workspaces`, `platform_users`,
 `platform_feedback`, `platform_contact_requests`, `platform_set_workspace_plan`,
-`platform_set_workspace_status`). They get **no** extra row access: they can't read any
+`platform_set_workspace_status`, `platform_activate_workspace`, `platform_extend_trial`,
+`platform_end_subscription`). They get **no** extra row access: they can't read any
 workspace's deals, contacts, companies, activities or tasks. The table has no client policies;
 add yourself in the SQL editor:
 
@@ -136,6 +164,16 @@ Notes for existing projects:
 - `20260927000001` (plans, RBAC, platform console) is also available as one paste-able,
   all-or-nothing script, `goom_upgrade_2026-09-27.sql` (handed over with this upgrade), for projects that are upgraded from the SQL
   editor instead of `supabase db push` (it records itself in `supabase_migrations.schema_migrations`).
+- `20261007000001` (production hardening) does the following on an existing database:
+  - It **starts a 14-day trial for every existing workspace at the moment you push it**. Activate
+    paying or complimentary customers in the Platform console before the trials end.
+  - It deletes the leaked seed account `marakicreative@gmail.com`, promoting another member to admin
+    first if needed.
+  - It throttles invitation emails (3 per invitation, 30 per workspace per day, 20 per sender per
+    hour).
+  - Deleting a deal or contact now keeps its activities.
+  - It adds the guards and indexes described in the file header.
+  - Redeploy both edge functions after pushing it.
 - After pushing, regenerate the client types and compare with the committed file:
   `npx supabase gen types typescript --linked > src/integrations/supabase/types.ts`
 
@@ -186,14 +224,14 @@ history. Redeploy `ai-chat` after applying `20260927000001` so the plan limit ge
 | Where (Dashboard -> Authentication) | Setting |
 |---|---|
 | URL Configuration -> Site URL | `https://app.yourdomain.com` (your production URL, not localhost) |
-| URL Configuration -> Redirect URLs | `https://app.yourdomain.com/**` (plus preview URLs you actually use) |
+| URL Configuration -> Redirect URLs | `https://app.yourdomain.com/**` (covers `/auth?mode=reset`, `/invite/*`, `/dashboard`, `/settings`; add preview URLs you actually use) |
 | Sign In / Providers -> Email | **Confirm email: ON** (invitations are matched on confirmed email addresses) |
 | Sign In / Providers -> Email | Secure password change: ON; Secure email change: ON |
 | Passwords / Policies | Minimum length **8**; required characters: **letters and digits** |
 | Passwords / Policies | **Leaked password protection: ON** (HaveIBeenPwned check, Pro plan) |
 | Multi-Factor | TOTP (authenticator app): **enabled** |
 | Rate Limits | Keep the defaults or stricter; configure custom SMTP so auth emails are not throttled |
-| Attack Protection | Consider enabling CAPTCHA (Turnstile/hCaptcha) for sign-up and password reset |
+| Attack Protection | **Enable CAPTCHA** (provider Turnstile) for sign-up, sign-in and password reset: every sign-up creates a workspace and a trial. Deploy the frontend with `VITE_TURNSTILE_SITE_KEY` first; enabled without it, password sign-in is refused |
 | Sessions | Optional: inactivity timeout / time-box for sensitive deployments |
 | Emails -> SMTP | Configure a real SMTP provider (the built-in one is for testing only) |
 
@@ -223,8 +261,17 @@ deleted everywhere (exact names/titles/emails from the old seed files). Run it *
 3. Run the whole file. It's a single transaction (any error rolls everything back) and re-running
    it is a no-op. The shared and new workspaces are put on the Growth plan so nobody loses what
    they had.
-4. Optionally delete the old seed account `marakicreative@gmail.com` (statement at the end of the
-   file, commented out) — it was created with a publicly known password.
+4. The old seed account `marakicreative@gmail.com` (publicly known password) is deleted by
+   migration `20261007000001`.
+
+Before launch, check whether the split was run: this lists workspaces that still have several
+members, oldest first.
+
+```sql
+select o.id, o.name, count(*) as members, min(m.joined_at) as oldest
+from public.organizations o join public.organization_members m on m.organization_id = o.id
+group by o.id, o.name having count(*) > 1 order by members desc;
+```
 
 ## Local development
 

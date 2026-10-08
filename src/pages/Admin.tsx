@@ -190,7 +190,7 @@ function ShortcutsCard() {
     { to: "/settings?tab=roles", icon: KeyRound, title: "Roles & permissions", text: "What admins, managers and reps can do" },
     { to: "/settings?tab=billing", icon: Gauge, title: "Plan & usage", text: "Your plan, limits and usage" },
     { to: "/settings?tab=pipeline", icon: Kanban, title: "Pipeline", text: "Stages, probabilities and pipelines" },
-    { to: "/settings?tab=templates", icon: Mail, title: "Email templates", text: "Shared reusable emails" },
+    { to: "/settings?tab=templates", icon: Mail, title: "Email templates", text: "Your reusable emails" },
     { to: "/data", icon: FileUp, title: "Import & export", text: "CSV import and export" },
   ];
   return (

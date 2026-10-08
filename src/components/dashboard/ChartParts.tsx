@@ -1,7 +1,9 @@
 import { useId, useState } from "react";
 import type { LucideIcon } from "lucide-react";
-import { ArrowDownRight, ArrowUpRight, BarChart3, Minus, Table2 } from "lucide-react";
+import { ArrowDownRight, ArrowUpRight, BarChart3, Database, Minus, Table2 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { EmptyState, ErrorState } from "@/components/common/States";
+import { AnalyticsRowLimitError } from "@/hooks/useAnalytics";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------------------------
@@ -346,4 +348,23 @@ export function ChartEmpty({
 /** Held-frame wrapper: while a query refetches, keep the previous render at reduced opacity. */
 export function Refetching({ active, children }: { active?: boolean; children: React.ReactNode }) {
   return <div className={cn("transition-opacity duration-200", active && "opacity-60")}>{children}</div>;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Page-level load error
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Load error for a whole analytics page. The row-limit error explains itself (a retry can't fix
+ * it, so none is offered); anything else goes through the shared, sanitized ErrorState.
+ */
+export function AnalyticsErrorState({ error, onRetry, title }: { error: unknown; onRetry?: () => void; title: string }) {
+  if (error instanceof AnalyticsRowLimitError) {
+    return (
+      <div role="alert">
+        <EmptyState icon={Database} title={title} description={error.message} />
+      </div>
+    );
+  }
+  return <ErrorState error={error} onRetry={onRetry} title={title} />;
 }

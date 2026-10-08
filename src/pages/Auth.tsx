@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { INVITE_TOKEN_KEY, useAuth, type AppRole } from "@/contexts/AuthContext";
-import { PLANS, type PlanId } from "@/lib/plans";
+import { PLANS, TRIAL_DAYS, type PlanId } from "@/lib/plans";
 import { Badge } from "@/components/ui/badge";
 import { readSelectedPlan, storeSelectedPlan } from "@/components/onboarding/selectedPlan";
 import { Button } from "@/components/ui/button";
@@ -27,6 +27,8 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Brand } from "@/components/Brand";
 import { FieldError, PasswordChecklist, PasswordInput } from "@/components/settings/shared";
+import { Captcha } from "@/components/common/Captcha";
+import { CAPTCHA_MISSING_MESSAGE, useCaptcha } from "@/hooks/useCaptcha";
 import {
   emailSchema,
   errorMessage,
@@ -46,7 +48,15 @@ interface InvitePreview {
   accepted: boolean;
 }
 
-type InviteStatus = "none" | "loading" | "invalid" | "expired" | "accepted" | "valid";
+type InviteStatus = "none" | "loading" | "error" | "invalid" | "expired" | "accepted" | "valid";
+
+function forgetInviteToken() {
+  try {
+    sessionStorage.removeItem(INVITE_TOKEN_KEY);
+  } catch {
+    // storage blocked
+  }
+}
 
 const signInSchema = z.object({
   email: emailSchema,
@@ -142,13 +152,18 @@ export default function Auth() {
   // Signed-out visitors: keep the token so AuthContext accepts it right after sign-in (also survives
   // the Google OAuth round trip, which returns to this tab). Signed-in visitors join explicitly below.
   useEffect(() => {
-    if (token && !loading && !session) sessionStorage.setItem(INVITE_TOKEN_KEY, token);
+    if (!token || loading || session) return;
+    try {
+      sessionStorage.setItem(INVITE_TOKEN_KEY, token);
+    } catch {
+      // storage blocked: the invitee can open the link again after signing in
+    }
   }, [token, loading, session]);
 
   const previewQuery = useQuery({
     queryKey: ["invite-preview", token],
     enabled: !!token,
-    retry: false,
+    retry: 2,
     staleTime: Infinity,
     queryFn: async (): Promise<InvitePreview | null> => {
       const { data, error } = await supabase.rpc("get_invitation_preview", { p_token: token! });
@@ -163,8 +178,10 @@ export default function Auth() {
     ? "none"
     : previewQuery.isLoading
       ? "loading"
-      : previewQuery.isError || !invite
-        ? "invalid"
+      : previewQuery.isError
+        ? "error"
+        : !invite
+          ? "invalid"
         : invite.accepted
           ? "accepted"
           : invite.expired
@@ -173,9 +190,7 @@ export default function Auth() {
 
   // A dead invite must not be accepted later by AuthContext.
   useEffect(() => {
-    if (inviteStatus === "invalid" || inviteStatus === "expired" || inviteStatus === "accepted") {
-      sessionStorage.removeItem(INVITE_TOKEN_KEY);
-    }
+    if (inviteStatus === "invalid" || inviteStatus === "expired" || inviteStatus === "accepted") forgetInviteToken();
   }, [inviteStatus]);
 
   const emailMismatch =
@@ -192,27 +207,16 @@ export default function Auth() {
     const workspace = invite?.organization_name ?? "the workspace";
     const alreadyAccepted = inviteStatus === "accepted";
     (async () => {
-      if (alreadyAccepted) {
-        sessionStorage.removeItem(INVITE_TOKEN_KEY);
-        await refreshUserRole();
-        toast.success(`You're in ${workspace}`);
-        navigate("/dashboard", { replace: true });
-        return;
-      }
       // AuthContext may already have accepted it during sign-in; don't let it retry in parallel.
-      sessionStorage.removeItem(INVITE_TOKEN_KEY);
+      forgetInviteToken();
+      // For an invitation the user already accepted this switches them back to that workspace.
       const { error } = await supabase.rpc("accept_invitation", { p_token: token });
       if (error) {
-        // Accepted a moment ago by AuthContext (right after sign-in)? Then this isn't a failure.
-        const { data } = await supabase.rpc("get_invitation_preview", { p_token: token });
-        const row = (Array.isArray(data) ? data[0] : data) as unknown as InvitePreview | null | undefined;
-        if (!row?.accepted) {
-          setJoinError(errorMessage(error));
-          return;
-        }
+        setJoinError(errorMessage(error));
+        return;
       }
       await refreshUserRole();
-      toast.success(`You joined ${workspace}`);
+      toast.success(alreadyAccepted ? `You're in ${workspace}` : `You joined ${workspace}`);
       navigate("/dashboard", { replace: true });
     })().catch((err) => setJoinError(errorMessage(err)));
   }, [loading, token, canJoin, inviteStatus, invite?.organization_name, refreshUserRole, navigate]);
@@ -235,6 +239,18 @@ export default function Auth() {
     content = (
       <div className="flex items-center gap-2 text-sm text-muted-foreground" aria-busy="true">
         <Loader2 className="h-4 w-4 animate-spin" /> Checking your invitation…
+      </div>
+    );
+  } else if (token && inviteStatus === "error") {
+    content = (
+      <div className="space-y-4">
+        <Header
+          title="We couldn't check your invitation"
+          description="Check your connection and try again. Your invitation hasn't been used."
+        />
+        <Button onClick={() => void previewQuery.refetch()} loading={previewQuery.isFetching}>
+          Try again
+        </Button>
       </div>
     );
   } else if (token && inviteStatus !== "valid" && !canJoin) {
@@ -356,7 +372,7 @@ export default function Auth() {
             {!invite && selectedPlan && (
               <p className="-mt-2 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
                 <Badge variant="secondary">Selected plan: {PLANS[selectedPlan].name}</Badge>
-                <span className="text-xs">Free during the beta. You can change it any time.</span>
+                <span className="text-xs">Free for {TRIAL_DAYS} days, no card required. You can switch plans during the trial.</span>
               </p>
             )}
             <SignUpForm
@@ -520,11 +536,21 @@ function SignInForm({
     defaultValues: { email: lockedEmail ?? "", password: "" },
   });
   const { register, handleSubmit, formState, getValues } = form;
+  const captcha = useCaptcha();
 
   const onSubmit = handleSubmit(async (values) => {
     setFormError(null);
     setUnconfirmed(false);
-    const { error } = await supabase.auth.signInWithPassword({ email: values.email, password: values.password });
+    if (captcha.missing) {
+      setFormError(CAPTCHA_MISSING_MESSAGE);
+      return;
+    }
+    const { error } = await supabase.auth.signInWithPassword({
+      email: values.email,
+      password: values.password,
+      options: { captchaToken: captcha.token },
+    });
+    captcha.reset();
     if (error) {
       if (error.message.toLowerCase().includes("not confirmed")) setUnconfirmed(true);
       setFormError(errorMessage(error));
@@ -576,6 +602,7 @@ function SignInForm({
         />
         <FieldError id="signin-password-error" message={formState.errors.password?.message} />
       </div>
+      <Captcha {...captcha.widgetProps} action="login" />
       <Button type="submit" className="w-full" disabled={formState.isSubmitting}>
         {formState.isSubmitting ? (
           <>
@@ -608,12 +635,22 @@ function SignUpForm({
   const { register, handleSubmit, formState, watch } = form;
   const password = watch("password");
   const checks = useMemo(() => passwordChecks(password ?? ""), [password]);
+  const captcha = useCaptcha();
 
   const onSubmit = handleSubmit(async (values) => {
     setFormError(null);
+    if (captcha.missing) {
+      setFormError(CAPTCHA_MISSING_MESSAGE);
+      return;
+    }
     const metadata: Record<string, string> = { full_name: values.fullName.trim() };
     if (token) metadata.invite_token = token;
-    else if (values.company?.trim()) metadata.company = values.company.trim();
+    else {
+      if (values.company?.trim()) metadata.company = values.company.trim();
+      // The confirmation email opens a new tab without this tab's sessionStorage.
+      const plan = readSelectedPlan();
+      if (plan) metadata.selected_plan = plan;
+    }
 
     const { data, error } = await supabase.auth.signUp({
       email: values.email,
@@ -623,8 +660,10 @@ function SignUpForm({
         emailRedirectTo: token
           ? `${window.location.origin}/invite/${token}`
           : `${window.location.origin}${redirectTo}`,
+        captchaToken: captcha.token,
       },
     });
+    captcha.reset();
     if (error) {
       setFormError(errorMessage(error));
       return;
@@ -703,6 +742,7 @@ function SignUpForm({
         </div>
         <FieldError id="signup-password-error" message={formState.errors.password?.message} />
       </div>
+      <Captcha {...captcha.widgetProps} action="signup" />
       <Button type="submit" className="w-full" disabled={formState.isSubmitting}>
         {formState.isSubmitting ? (
           <>
@@ -767,12 +807,19 @@ function ForgotPasswordForm({
     resolver: zodResolver(forgotSchema),
     defaultValues: { email: defaultEmail },
   });
+  const captcha = useCaptcha();
 
   const onSubmit = handleSubmit(async ({ email }) => {
     setFormError(null);
+    if (captcha.missing) {
+      setFormError(CAPTCHA_MISSING_MESSAGE);
+      return;
+    }
     const { error } = await supabase.auth.resetPasswordForEmail(email, {
       redirectTo: `${window.location.origin}/auth?mode=reset`,
+      captchaToken: captcha.token,
     });
+    captcha.reset();
     if (error) setFormError(errorMessage(error));
     else onSent(email);
   });
@@ -796,6 +843,7 @@ function ForgotPasswordForm({
           />
           <FieldError id="forgot-email-error" message={formState.errors.email?.message} />
         </div>
+        <Captcha {...captcha.widgetProps} action="recover" />
         <Button type="submit" className="w-full" disabled={formState.isSubmitting}>
           {formState.isSubmitting ? (
             <>
@@ -892,6 +940,7 @@ function InboxNotice({
   const [cooldown, setCooldown] = useState(0);
   const [sentAgain, setSentAgain] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const captcha = useCaptcha();
 
   useEffect(() => {
     if (cooldown <= 0) return;
@@ -901,13 +950,18 @@ function InboxNotice({
 
   const resend = async () => {
     if (!resendEmail) return;
-    setSending(true);
     setError(null);
+    if (captcha.missing) {
+      setError(CAPTCHA_MISSING_MESSAGE);
+      return;
+    }
+    setSending(true);
     const { error: resendError } = await supabase.auth.resend({
       type: "signup",
       email: resendEmail,
-      options: emailRedirectTo ? { emailRedirectTo } : undefined,
+      options: { emailRedirectTo, captchaToken: captcha.token },
     });
+    captcha.reset();
     setSending(false);
     if (resendError) {
       setError(errorMessage(resendError));
@@ -930,6 +984,7 @@ function InboxNotice({
           <CheckCircle2 className="h-4 w-4" aria-hidden /> Sent again.
         </p>
       )}
+      {resendEmail && <Captcha {...captcha.widgetProps} action="resend" />}
       <div className="flex flex-col gap-2">
         {resendEmail && (
           <Button variant="outline" onClick={resend} disabled={sending || cooldown > 0}>

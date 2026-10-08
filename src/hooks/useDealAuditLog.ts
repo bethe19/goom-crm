@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
+import { fetchAllRows } from "@/lib/fetchAll";
 
 export interface AuditEntry {
   id: string;
@@ -63,17 +64,23 @@ export function useDealAuditLog(dealId: string | undefined, options?: { enabled?
 export function useStageEnteredAt(pipelineId: string | undefined, options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: ["deal-stage-entered", pipelineId],
-    queryFn: async (): Promise<Record<string, string>> => {
-      const { data, error } = await supabase
-        .from("deal_audit_log")
-        .select("deal_id, created_at, deals!inner(pipeline_id)")
-        .eq("field", "stage_id")
-        .eq("deals.pipeline_id", pipelineId)
-        .order("created_at", { ascending: false })
-        .limit(1000);
-      if (error) throw error;
+    queryFn: async ({ signal }): Promise<Record<string, string>> => {
+      // Paged past the 1,000-row response cap; newest first (id breaks ties so pages are stable).
+      const rows = await fetchAllRows(
+        (from, to) =>
+          supabase
+            .from("deal_audit_log")
+            .select("deal_id, created_at, deals!inner(pipeline_id)")
+            .eq("field", "stage_id")
+            .eq("deals.pipeline_id", pipelineId)
+            .order("created_at", { ascending: false })
+            .order("id", { ascending: false })
+            .range(from, to)
+            .abortSignal(signal),
+        { signal },
+      );
       const map: Record<string, string> = {};
-      for (const row of (data ?? []) as { deal_id: string; created_at: string }[]) {
+      for (const row of rows as { deal_id: string; created_at: string }[]) {
         if (!map[row.deal_id]) map[row.deal_id] = row.created_at;
       }
       return map;

@@ -3,11 +3,12 @@
 // Request  (POST, Authorization: Bearer <user access token>): { invitation_id: uuid }
 // Response: 200 { sent: true }                     email accepted by the provider
 //           200 { sent: false, reason: string }    no email provider configured / provider failed
-//           { error } with 400, 401, 403, 404, 405, 409 (already accepted), 410 (expired)
+//           { error } with 400, 401, 403, 404, 405, 409 (already accepted), 410 (expired),
+//           413 (body too large), 429 (send throttle; Retry-After header)
 //
 // Secrets: RESEND_API_KEY + INVITE_FROM_EMAIL (e.g. "Acme CRM <invites@yourdomain.com>", a
 // domain verified in Resend) and SITE_URL (public app URL, e.g. https://app.example.com).
-import { errorResponse, json, preflight } from "../_shared/cors.ts";
+import { errorResponse, json, readJsonBody, serveWithCors } from "../_shared/cors.ts";
 import { adminClient, getCaller } from "../_shared/supabase.ts";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -20,6 +21,23 @@ function escapeHtml(value: string): string {
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
 }
+
+/** Strips control/bidi/zero-width characters and caps length: these labels are user-controlled. */
+function cleanLabel(value: string, max: number): string {
+  const s = value
+    // deno-lint-ignore no-control-regex
+    .replace(/[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u2028-\u202E\u2060-\u206F\uFEFF]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
+
+const THROTTLE_MESSAGES: Record<string, string> = {
+  invite_max: "This invitation has already been emailed several times. Share the link instead.",
+  invite_cooldown: "This invitation was emailed a few minutes ago. Share the link, or try again later.",
+  org_daily: "Your workspace has sent its invitation emails for today. Share the links instead, or try again tomorrow.",
+  user_hourly: "You've sent a lot of invitation emails recently. Share the links instead, or try again later.",
+};
 
 function siteUrl(): string | null {
   const raw = (Deno.env.get("SITE_URL") ?? "").trim().replace(/\/+$/, "");
@@ -82,19 +100,18 @@ function renderEmail(opts: { workspace: string; inviter: string; role: string; l
   return { html, text };
 }
 
-Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return preflight(req);
+serveWithCors(async (req) => {
   if (req.method !== "POST") return errorResponse(req, 405, "Method not allowed.");
 
-  const user = await getCaller(req);
-  if (!user) return errorResponse(req, 401, "Sign in to send invitations.");
-
-  let body: { invitation_id?: unknown };
-  try {
-    body = await req.json();
-  } catch {
-    return errorResponse(req, 400, "Request body must be JSON.");
+  const caller = await getCaller(req);
+  if (!caller.user) {
+    return errorResponse(req, caller.status, caller.status === 401 ? "Sign in to send invitations." : "Invitations are temporarily unavailable.");
   }
+  const user = caller.user;
+
+  const parsed = await readJsonBody(req, 4 * 1024);
+  if (!parsed.ok) return errorResponse(req, parsed.status, parsed.message);
+  const body = parsed.value as { invitation_id?: unknown } | null;
   const invitationId = typeof body?.invitation_id === "string" ? body.invitation_id.trim() : "";
   if (!UUID_RE.test(invitationId)) return errorResponse(req, 400, "invitation_id must be a UUID.");
 
@@ -108,7 +125,7 @@ Deno.serve(async (req) => {
 
   const { data: invitation, error: invError } = await admin
     .from("invitations")
-    .select("id, organization_id, email, role, token, invited_by, expires_at, accepted_at, organizations(name)")
+    .select("id, organization_id, email, role, token, invited_by, expires_at, accepted_at, organizations(name, status, trial_ends_at, paid_until)")
     .eq("id", invitationId)
     .maybeSingle();
   if (invError) {
@@ -117,16 +134,32 @@ Deno.serve(async (req) => {
   }
   if (!invitation) return errorResponse(req, 404, "Invitation not found.");
 
-  // Only admins/managers of the invitation's workspace may send it.
-  const { data: membership } = await admin
+  // Only admins/managers of the invitation's workspace may send it; managers only for reps
+  // (mirrors create_invitation).
+  const { data: membership, error: memberError } = await admin
     .from("organization_members")
     .select("role")
     .eq("organization_id", invitation.organization_id)
     .eq("user_id", user.id)
     .maybeSingle();
+  if (memberError) {
+    console.error("send-invite: membership lookup failed", memberError.message);
+    return errorResponse(req, 500, "Invitations are temporarily unavailable.");
+  }
   if (!membership || (membership.role !== "admin" && membership.role !== "manager")) {
     return errorResponse(req, 403, "Only workspace admins and managers can send invitations.");
   }
+  if (membership.role === "manager" && invitation.role !== "rep") {
+    return errorResponse(req, 403, "Managers can only send invitations for sales reps.");
+  }
+
+  type OrgRow = { name?: string; status?: string; trial_ends_at?: string | null; paid_until?: string | null };
+  const orgRaw = invitation.organizations as unknown as OrgRow | OrgRow[] | null;
+  const org = Array.isArray(orgRaw) ? orgRaw[0] : orgRaw;
+  if (org?.status !== "active") return errorResponse(req, 403, "This workspace is suspended. Contact support.");
+  const now = Date.now();
+  const billingOk = (org.paid_until && Date.parse(org.paid_until) > now) || (org.trial_ends_at && Date.parse(org.trial_ends_at) > now);
+  if (!billingOk) return errorResponse(req, 403, "This workspace's trial or subscription has ended. Choose a plan to invite teammates.");
 
   if (invitation.accepted_at) return errorResponse(req, 409, "This invitation has already been accepted.");
   if (new Date(invitation.expires_at).getTime() < Date.now()) {
@@ -140,15 +173,31 @@ Deno.serve(async (req) => {
     return json(req, { sent: false, reason: "Email delivery is not configured." });
   }
 
+  // Atomic per-invitation / per-workspace / per-user send throttle (anti-spam).
+  const { data: denied, error: claimError } = await admin.rpc("claim_invite_email", {
+    p_invitation_id: invitation.id,
+    p_user_id: user.id,
+  });
+  if (claimError) {
+    console.error("send-invite: throttle check failed", claimError.message);
+    return errorResponse(req, 500, "Invitations are temporarily unavailable.");
+  }
+  if (denied) {
+    const message = THROTTLE_MESSAGES[denied as string] ?? "Too many invitation emails. Share the link instead.";
+    return json(req, { error: message, code: "rate_limit" }, 429, { "Retry-After": "600" });
+  }
+
   const { data: inviterProfile } = await admin
     .from("profiles")
     .select("full_name")
     .eq("user_id", user.id)
     .maybeSingle();
 
-  const org = invitation.organizations as unknown as { name?: string } | { name?: string }[] | null;
-  const workspace = (Array.isArray(org) ? org[0]?.name : org?.name) || "a workspace";
-  const inviter = inviterProfile?.full_name?.trim() || user.email || "A teammate";
+  // Workspace and profile names are free text: clean them, and show the inviter's verified
+  // address so an impersonating display name is obvious to the recipient.
+  const workspace = cleanLabel(org?.name || "", 60) || "a workspace";
+  const inviterName = cleanLabel(inviterProfile?.full_name ?? "", 60);
+  const inviter = inviterName && user.email ? `${inviterName} (${user.email})` : inviterName || user.email || "A teammate";
   const link = `${site}/invite/${encodeURIComponent(invitation.token)}`;
   const expires = new Date(invitation.expires_at).toUTCString().replace(/ \d\d:\d\d:\d\d GMT$/, "");
   const { html, text } = renderEmail({ workspace, inviter, role: invitation.role, link, expires });
@@ -160,7 +209,8 @@ Deno.serve(async (req) => {
       body: JSON.stringify({
         from,
         to: [invitation.email],
-        subject: `${inviter} invited you to ${workspace}`,
+        // Fixed subject: user-controlled text never reaches the inbox list.
+        subject: "You've been invited to join a workspace",
         html,
         text,
       }),

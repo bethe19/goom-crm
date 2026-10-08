@@ -3,7 +3,8 @@ import { supabase } from "@/integrations/supabase/client";
 import { assertAffected } from "@/components/settings/validation";
 import { useEffect, useId } from "react";
 import { ilikeAny } from "@/lib/postgrest";
-import type { PipelineStage } from "@/hooks/usePipelineStages";
+import { fetchAllRows } from "@/lib/fetchAll";
+import { defaultProbabilityForStage, type PipelineStage } from "@/hooks/usePipelineStages";
 import type { TablesInsert, TablesUpdate } from "@/integrations/supabase/types";
 
 export interface Deal {
@@ -43,24 +44,46 @@ export function invalidateDealQueries(queryClient: QueryClient) {
   }
 }
 
-/** Subscribes to realtime changes with a channel name unique to this mount. */
+/** Mutation key shared by every stage move (also its serialization scope). */
+export const DEAL_MOVE_KEY = ["deal-move"] as const;
+
+const REALTIME_DEBOUNCE_MS = 400;
+
+/**
+ * Subscribes to realtime deal and stage changes of a pipeline (channel name unique to this mount).
+ * Bursts of events (imports, bulk edits) are debounced into one refetch.
+ */
 function useRealtimeDeals(pipelineId: string | undefined) {
   const queryClient = useQueryClient();
   const uid = useId();
   useEffect(() => {
     if (!pipelineId) return;
+    let dealsTimer: ReturnType<typeof setTimeout> | undefined;
+    let stagesTimer: ReturnType<typeof setTimeout> | undefined;
+    const refreshDeals = () => {
+      clearTimeout(dealsTimer);
+      dealsTimer = setTimeout(() => {
+        // A move in flight refreshes everything when it settles; refetching now would undo its optimistic update.
+        if (queryClient.isMutating({ mutationKey: DEAL_MOVE_KEY }) > 0) return;
+        queryClient.invalidateQueries({ queryKey: ["deals", pipelineId] });
+        queryClient.invalidateQueries({ queryKey: ["deal"] });
+      }, REALTIME_DEBOUNCE_MS);
+    };
+    // New or changed stages: without them the board can't place deals that moved into a new stage.
+    const refreshStages = () => {
+      clearTimeout(stagesTimer);
+      stagesTimer = setTimeout(() => {
+        queryClient.invalidateQueries({ queryKey: ["pipeline_stages", pipelineId] });
+      }, REALTIME_DEBOUNCE_MS);
+    };
     const channel = supabase
-      .channel(`deals:${pipelineId}:${uid}:${Math.random().toString(36).slice(2, 8)}`)
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "deals", filter: `pipeline_id=eq.${pipelineId}` },
-        () => {
-          queryClient.invalidateQueries({ queryKey: ["deals", pipelineId] });
-          queryClient.invalidateQueries({ queryKey: ["deal"] });
-        },
-      )
+      .channel(`pipeline:${pipelineId}:${uid}:${Math.random().toString(36).slice(2, 8)}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "deals", filter: `pipeline_id=eq.${pipelineId}` }, refreshDeals)
+      .on("postgres_changes", { event: "*", schema: "public", table: "pipeline_stages", filter: `pipeline_id=eq.${pipelineId}` }, refreshStages)
       .subscribe();
     return () => {
+      clearTimeout(dealsTimer);
+      clearTimeout(stagesTimer);
       supabase.removeChannel(channel);
     };
   }, [pipelineId, queryClient, uid]);
@@ -70,15 +93,22 @@ function useRealtimeDeals(pipelineId: string | undefined) {
 export function useDeals(pipelineId: string | undefined, options?: { enabled?: boolean; realtime?: boolean }) {
   const query = useQuery({
     queryKey: ["deals", pipelineId],
-    queryFn: async (): Promise<Deal[]> => {
+    queryFn: async ({ signal }): Promise<Deal[]> => {
       if (!pipelineId) return [];
-      const { data, error } = await supabase
-        .from("deals")
-        .select(DEAL_SELECT)
-        .eq("pipeline_id", pipelineId)
-        .order("created_at", { ascending: false });
-      if (error) throw error;
-      return (data ?? []).map(normalizeDeal);
+      // Paged: a single request is capped at 1,000 rows. created_at + id keeps pages stable.
+      const rows = await fetchAllRows(
+        (from, to) =>
+          supabase
+            .from("deals")
+            .select(DEAL_SELECT)
+            .eq("pipeline_id", pipelineId)
+            .order("created_at", { ascending: false })
+            .order("id", { ascending: false })
+            .range(from, to)
+            .abortSignal(signal),
+        { signal },
+      );
+      return rows.map(normalizeDeal);
     },
     enabled: !!pipelineId && (options?.enabled ?? true),
   });
@@ -139,16 +169,21 @@ export interface CalendarDeal {
 export function useDealsClosingBetween(from: string, to: string, options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: ["calendar", "deals", from, to],
-    queryFn: async (): Promise<CalendarDeal[]> => {
-      const { data, error } = await supabase
-        .from("deals")
-        .select("id, title, close_date, value, pipeline_id, stage_id")
-        .gte("close_date", from)
-        .lte("close_date", to)
-        .order("close_date", { ascending: true })
-        .limit(1000);
-      if (error) throw error;
-      return ((data ?? []) as CalendarDeal[]).map((d) => ({ ...d, value: Number(d.value ?? 0) }));
+    queryFn: async ({ signal }): Promise<CalendarDeal[]> => {
+      const rows = await fetchAllRows(
+        (start, end) =>
+          supabase
+            .from("deals")
+            .select("id, title, close_date, value, pipeline_id, stage_id")
+            .gte("close_date", from)
+            .lte("close_date", to)
+            .order("close_date", { ascending: true })
+            .order("id", { ascending: true })
+            .range(start, end)
+            .abortSignal(signal),
+        { signal },
+      );
+      return (rows as CalendarDeal[]).map((d) => ({ ...d, value: Number(d.value ?? 0) }));
     },
     enabled: options?.enabled ?? true,
   });
@@ -203,49 +238,94 @@ export function useUpdateDeal() {
   });
 }
 
-/** Fields to write when a deal moves into `stage` (probability follows won/lost or a configured stage probability). */
-export function stageMoveUpdates(stage: PipelineStage, lostReason?: string | null): TablesUpdate<"deals"> {
+/** Values a move can put back instead of the stage-derived ones (Undo restores the deal's previous values). */
+export type DealMoveRestore = Partial<Pick<Deal, "probability" | "lost_reason">>;
+
+/**
+ * Fields to write when a deal moves into `stage` (probability follows won/lost or a configured stage probability).
+ * Reopening a won/lost deal (`from` is closed) into a stage without a configured probability uses the stage default
+ * rather than keeping 100%/0%. `restore` wins over everything derived from the stage.
+ */
+export function stageMoveUpdates(
+  stage: PipelineStage,
+  lostReason?: string | null,
+  options?: { from?: Pick<PipelineStage, "is_won" | "is_lost"> | null; restore?: DealMoveRestore },
+): TablesUpdate<"deals"> {
   const updates: TablesUpdate<"deals"> = { stage_id: stage.id };
   if (stage.is_won) updates.probability = 100;
   else if (stage.is_lost) updates.probability = 0;
   else if (typeof stage.probability === "number") updates.probability = stage.probability;
+  else if (options?.from?.is_won || options?.from?.is_lost) updates.probability = defaultProbabilityForStage(stage);
   if (stage.is_lost) updates.lost_reason = lostReason?.trim() ? lostReason.trim() : null;
+  const restore = options?.restore;
+  if (typeof restore?.probability === "number") updates.probability = restore.probability;
+  if (restore && restore.lost_reason !== undefined) updates.lost_reason = restore.lost_reason;
   return updates;
+}
+
+export interface MoveDealInput {
+  deal: Deal;
+  stage: PipelineStage;
+  lostReason?: string | null;
+  /** The stage the deal is leaving (decides the probability when a won/lost deal is reopened). */
+  fromStage?: PipelineStage | null;
+  restore?: DealMoveRestore;
+}
+
+const moveUpdates = ({ stage, lostReason, fromStage, restore }: MoveDealInput) => stageMoveUpdates(stage, lostReason, { from: fromStage, restore });
+
+/** Puts back the fields a failed move patched, unless the deal has changed stage again since. */
+function revertMove(current: Deal, before: Deal, patch: Partial<Deal>): Deal {
+  if (current.stage_id !== patch.stage_id) return current;
+  const fields = Object.fromEntries(Object.keys(patch).map((k) => [k, before[k as keyof Deal]]));
+  return { ...current, ...fields };
 }
 
 /**
  * Moves a deal to another stage with an optimistic cache update and rollback on error.
- * The caller shows the error toast (`onError`) so the message can name the deal.
+ * Moves run one at a time (shared scope) and a failure only reverts its own deal.
+ * Callers should use `mutateAsync` and toast per call: callbacks passed to `mutate` are dropped
+ * as soon as another move starts.
  */
 export function useMoveDeal() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async ({ deal, stage, lostReason }: { deal: Deal; stage: PipelineStage; lostReason?: string | null }) => {
+    mutationKey: DEAL_MOVE_KEY,
+    scope: { id: "deal-move" },
+    mutationFn: async (input: MoveDealInput) => {
       const { data, error } = await supabase
         .from("deals")
-        .update(stageMoveUpdates(stage, lostReason))
-        .eq("id", deal.id)
+        .update(moveUpdates(input))
+        .eq("id", input.deal.id)
         .select(DEAL_SELECT)
         .single();
       if (error) throw error;
       return normalizeDeal(data);
     },
-    onMutate: async ({ deal, stage, lostReason }) => {
+    onMutate: async (input) => {
+      const { deal } = input;
       const listKey = ["deals", deal.pipeline_id];
       await queryClient.cancelQueries({ queryKey: listKey });
-      const previousList = queryClient.getQueryData<Deal[]>(listKey);
+      const before = queryClient.getQueryData<Deal[]>(listKey)?.find((d) => d.id === deal.id) ?? deal;
       const previousDetail = queryClient.getQueryData<Deal | null>(["deal", deal.id]);
-      const patch = stageMoveUpdates(stage, lostReason) as Partial<Deal>;
+      const patch = moveUpdates(input) as Partial<Deal>;
       queryClient.setQueryData<Deal[]>(listKey, (old) => old?.map((d) => (d.id === deal.id ? { ...d, ...patch } : d)));
       if (previousDetail) queryClient.setQueryData(["deal", deal.id], { ...previousDetail, ...patch });
-      return { listKey, previousList, previousDetail };
+      return { listKey, before, previousDetail, patch };
     },
     onError: (_err, { deal }, ctx) => {
       if (!ctx) return;
-      queryClient.setQueryData(ctx.listKey, ctx.previousList);
-      if (ctx.previousDetail !== undefined) queryClient.setQueryData(["deal", deal.id], ctx.previousDetail);
+      // Only this deal: other moves still in flight keep their optimistic state.
+      queryClient.setQueryData<Deal[]>(ctx.listKey, (old) => old?.map((d) => (d.id === deal.id ? revertMove(d, ctx.before, ctx.patch) : d)));
+      const previousDetail = ctx.previousDetail;
+      if (previousDetail) {
+        queryClient.setQueryData<Deal | null>(["deal", deal.id], (cur) => (cur ? revertMove(cur, previousDetail, ctx.patch) : cur));
+      }
     },
-    onSettled: () => invalidateDealQueries(queryClient),
+    onSettled: () => {
+      // Refetch once the last queued move settles; refetching earlier would undo the others' optimistic updates.
+      if (queryClient.isMutating({ mutationKey: DEAL_MOVE_KEY }) <= 1) invalidateDealQueries(queryClient);
+    },
   });
 }
 
@@ -262,6 +342,8 @@ export function useDeleteDeal() {
       invalidateDealQueries(queryClient);
       queryClient.invalidateQueries({ queryKey: ["tasks"] });
       queryClient.invalidateQueries({ queryKey: ["activities"] });
+      queryClient.invalidateQueries({ queryKey: ["activities-feed"] });
+      queryClient.invalidateQueries({ queryKey: ["global-search"] });
     },
   });
 }

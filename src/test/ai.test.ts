@@ -18,6 +18,21 @@ describe("aiErrorFromStatus", () => {
     expect(aiErrorFromStatus(429)).toBeInstanceOf(AiRateLimitError);
     expect(aiErrorFromStatus(500).message).toMatch(/couldn't answer/i);
   });
+
+  it("shows the server's message for a request that can't succeed on retry", () => {
+    const err = aiErrorFromStatus(400, { error: "This conversation is too long for the assistant. Clear it and ask again." });
+    expect(err.message).toMatch(/too long/);
+    expect(err.status).toBe(400);
+  });
+});
+
+describe("normalizeAiMarkdown links", () => {
+  it("never turns model output into clickable links", () => {
+    expect(normalizeAiMarkdown("Verify at [the portal](https://evil.example/login) now")).toBe(
+      "Verify at the portal (https://evil.example/login) now",
+    );
+    expect(normalizeAiMarkdown("[https://a.example](https://a.example)")).toBe("https://a.example");
+  });
 });
 
 describe("normalizeAiMarkdown", () => {

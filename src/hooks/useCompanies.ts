@@ -1,7 +1,7 @@
-import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient, keepPreviousData, type QueryClient, type QueryKey } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { assertAffected } from "@/components/settings/validation";
-import { ilikeAny, PAGE_SIZE } from "@/lib/postgrest";
+import { ilikeAny, PAGE_SIZE, rangeNotSatisfiableTotal } from "@/lib/postgrest";
 import { chunk, escapeLike, fetchAllRows } from "@/lib/fetchAll";
 import { stageOutcome } from "@/hooks/usePipelineStages";
 import { RELATED_ACTIVITY_SELECT, RELATED_DEAL_SELECT, type Contact, type RelatedActivity, type RelatedDeal } from "@/hooks/useContacts";
@@ -84,7 +84,13 @@ export function useCompaniesPage(params: CompaniesPageParams) {
         .order("id", { ascending: true })
         .range(page * pageSize, page * pageSize + pageSize - 1);
       const { data, error, count } = await query;
-      if (error) throw error;
+      if (error) {
+        // Offset past the end (e.g. the last page was just deleted): report it as an empty page so the
+        // list can step back instead of showing an error.
+        const outOfRangeTotal = rangeNotSatisfiableTotal(error);
+        if (outOfRangeTotal !== null) return { rows: [], total: outOfRangeTotal };
+        throw error;
+      }
       const rows = ((data ?? []) as (Company & { contacts?: { count: number }[] })[]).map(({ contacts, ...c }) => ({
         ...c,
         contact_count: contacts?.[0]?.count ?? 0,
@@ -159,11 +165,15 @@ export function useIndustries() {
 export async function findCompanyByName(name: string, excludeId?: string): Promise<Company | null> {
   const n = name.trim();
   if (!n) return null;
-  let query: AnyQuery = supabase.from("companies").select("*").ilike("name", escapeLike(n));
+  // PostgREST reads `*` in (i)like patterns as `%`, so match it as a single character (`_`) and
+  // confirm the exact name below.
+  const pattern = escapeLike(n).replace(/\*/g, "_");
+  let query: AnyQuery = supabase.from("companies").select("*").ilike("name", pattern);
   if (excludeId) query = query.neq("id", excludeId);
-  const { data, error } = await query.limit(1);
+  const { data, error } = await query.limit(20);
   if (error) throw error;
-  return ((data as Company[] | null) ?? [])[0] ?? null;
+  const target = n.toLowerCase();
+  return ((data as Company[] | null) ?? []).find((c) => c.name.toLowerCase() === target) ?? null;
 }
 
 /** Debounce the name yourself; returns an existing company with the same name, if any. */
@@ -177,6 +187,16 @@ export function useDuplicateCompanyName(name: string, excludeId?: string) {
   });
 }
 
+/** Query roots that show company names: lists, pickers and search. */
+const COMPANY_DATA_KEYS: QueryKey[] = [["companies"], ["company-options"], ["picker-label", "companies"], ["global-search"]];
+
+/** After a rename or delete, also records that embed the company name (contacts, deals). */
+const COMPANY_LINKED_KEYS: QueryKey[] = [...COMPANY_DATA_KEYS, ["contacts"], ["contact-options"], ["deals"], ["deal"]];
+
+function invalidateKeys(queryClient: QueryClient, keys: QueryKey[]) {
+  for (const queryKey of keys) queryClient.invalidateQueries({ queryKey });
+}
+
 export function useCreateCompany() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -185,9 +205,7 @@ export function useCreateCompany() {
       if (error) throw error;
       return data as Company;
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["companies"] });
-    },
+    onSuccess: () => invalidateKeys(queryClient, COMPANY_DATA_KEYS),
   });
 }
 
@@ -201,17 +219,9 @@ export function useUpdateCompany() {
     },
     onSuccess: (company) => {
       queryClient.setQueryData(["companies", "detail", company.id], company);
-      queryClient.invalidateQueries({ queryKey: ["companies"] });
-      queryClient.invalidateQueries({ queryKey: ["contacts"] });
-      queryClient.invalidateQueries({ queryKey: ["deals"] });
+      invalidateKeys(queryClient, COMPANY_LINKED_KEYS);
     },
   });
-}
-
-function invalidateAfterDelete(queryClient: ReturnType<typeof useQueryClient>) {
-  queryClient.invalidateQueries({ queryKey: ["companies"] });
-  queryClient.invalidateQueries({ queryKey: ["contacts"] });
-  queryClient.invalidateQueries({ queryKey: ["deals"] });
 }
 
 export function useDeleteCompany() {
@@ -222,11 +232,15 @@ export function useDeleteCompany() {
       if (error) throw error;
       assertAffected(count);
     },
-    onSuccess: () => invalidateAfterDelete(queryClient),
+    onSuccess: () => invalidateKeys(queryClient, COMPANY_LINKED_KEYS),
   });
 }
 
-/** Deletes many companies with one `.in()` request per 100 ids. Resolves to the number deleted. */
+/**
+ * Deletes many companies with one `.in()` request per 100 ids. Resolves to the number the server
+ * actually deleted (rows the caller may not delete are skipped by RLS). Lists refresh even when a
+ * later chunk fails, so rows that were already deleted don't linger on screen.
+ */
 export function useBulkDeleteCompanies() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -235,11 +249,11 @@ export function useBulkDeleteCompanies() {
       for (const part of chunk(ids, 100)) {
         const { error, count } = await supabase.from("companies").delete({ count: "exact" }).in("id", part);
         if (error) throw error;
-        deleted += count ?? part.length;
+        deleted += count ?? 0;
       }
       return deleted;
     },
-    onSuccess: () => invalidateAfterDelete(queryClient),
+    onSettled: () => invalidateKeys(queryClient, COMPANY_LINKED_KEYS),
   });
 }
 

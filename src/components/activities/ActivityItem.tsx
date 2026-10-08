@@ -98,7 +98,8 @@ export function ActivityItem({ activity, onOpen, highlighted, hideDeal, hideCont
           </DropdownMenu>
         </div>
         {activity.description && (
-          <MarkdownView value={activity.description} className="mt-1 line-clamp-3 break-words text-sm text-muted-foreground" />
+          // Links sit above the title button's full-card click overlay so they stay clickable.
+          <MarkdownView value={activity.description} className="mt-1 line-clamp-3 break-words text-sm text-muted-foreground [&_a]:relative [&_a]:z-10" />
         )}
         <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
           <span>{meta.label}</span>

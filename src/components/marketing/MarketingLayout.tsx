@@ -204,7 +204,7 @@ export function PageHero({
 
 export function CtaBand({
   title = "Set up your workspace in a few minutes.",
-  description = "Create a workspace, import a CSV or load sample data, and invite your team when you're ready.",
+  description = "Create a workspace, import a CSV or add records by hand, and invite your team when you're ready.",
 }: {
   title?: string;
   description?: string;
